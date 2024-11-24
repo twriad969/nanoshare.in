@@ -2,17 +2,17 @@
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST');
+header('Access-Control-Allow-Headers: Content-Type');
 
 // Configuration
 $base_dir = __DIR__;
-$apis_dir = $base_dir . '/apis';
-$config_file = $apis_dir . '/config.json';
-$apis_file = $apis_dir . '/apis.json';
-$lock_file = $apis_dir . '/sync.lock';
+$config_file = $base_dir . '/config.json';
+$apis_file = $base_dir . '/apis.json';
+$lock_file = $base_dir . '/sync.lock';
 
 // Create directory if it doesn't exist
-if (!file_exists($apis_dir)) {
-    mkdir($apis_dir, 0777, true);
+if (!file_exists($base_dir)) {
+    mkdir($base_dir, 0777, true);
 }
 
 // Default data structures
@@ -42,14 +42,23 @@ function releaseLock($lock_file) {
 
 // Function to handle file operations with locking
 function handleFile($action, $file, $content = null) {
-    global $apis_dir, $default_data, $lock_file;
+    global $base_dir, $default_data, $lock_file;
     
-    // Ensure directory exists
-    if (!file_exists($apis_dir)) {
-        mkdir($apis_dir, 0777, true);
+    // Get filename without path
+    $filename = basename($file);
+    
+    // Validate filename
+    if (!in_array($filename, ['config.json', 'apis.json'])) {
+        return json_encode([
+            'success' => false,
+            'error' => 'Invalid file name'
+        ]);
     }
     
-    $filename = basename($file);
+    // Ensure directory exists
+    if (!file_exists($base_dir)) {
+        mkdir($base_dir, 0777, true);
+    }
     
     // Acquire lock
     if (!acquireLock($lock_file)) {
@@ -68,39 +77,41 @@ function handleFile($action, $file, $content = null) {
                     if ($content === false) {
                         throw new Exception("Failed to read file");
                     }
+                    $data = json_decode($content);
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        // If file exists but is invalid JSON, return default
+                        return json_encode($default_data[$filename]);
+                    }
                     return $content;
                 } else {
-                    // Create default file if it doesn't exist
-                    $default_content = json_encode($default_data[$filename], JSON_PRETTY_PRINT);
-                    if (file_put_contents($file, $default_content) === false) {
-                        throw new Exception("Failed to create default file");
-                    }
-                    return $default_content;
+                    // Return default data if file doesn't exist
+                    return json_encode($default_data[$filename]);
                 }
             
             case 'write':
-                if ($content) {
-                    // Ensure valid JSON
-                    $decoded = json_decode($content);
-                    if (json_last_error() !== JSON_ERROR_NONE) {
-                        throw new Exception("Invalid JSON content");
-                    }
-                    
-                    // Write to temporary file first
-                    $temp_file = $file . '.tmp';
-                    if (file_put_contents($temp_file, json_encode($decoded, JSON_PRETTY_PRINT)) === false) {
-                        throw new Exception("Failed to write temporary file");
-                    }
-                    
-                    // Rename temp file to target (atomic operation)
-                    if (!rename($temp_file, $file)) {
-                        unlink($temp_file);
-                        throw new Exception("Failed to update file");
-                    }
-                    
-                    return json_encode(['success' => true]);
+                if (!$content) {
+                    throw new Exception("No content provided");
                 }
-                throw new Exception("No content provided");
+                
+                // Ensure valid JSON
+                $decoded = json_decode($content);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    throw new Exception("Invalid JSON content");
+                }
+                
+                // Write to temporary file first
+                $temp_file = $file . '.tmp';
+                if (file_put_contents($temp_file, json_encode($decoded, JSON_PRETTY_PRINT)) === false) {
+                    throw new Exception("Failed to write temporary file");
+                }
+                
+                // Rename temp file to target (atomic operation)
+                if (!rename($temp_file, $file)) {
+                    unlink($temp_file);
+                    throw new Exception("Failed to update file");
+                }
+                
+                return json_encode(['success' => true]);
                 
             default:
                 throw new Exception("Invalid action");
@@ -118,23 +129,31 @@ function handleFile($action, $file, $content = null) {
 
 // Handle requests
 $method = $_SERVER['REQUEST_METHOD'];
-$file = isset($_GET['file']) ? $_GET['file'] : '';
 
-// Validate file parameter
-if (!$file || !in_array($file, ['config.json', 'apis.json'])) {
+// Handle preflight requests
+if ($method === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+// Get file parameter and validate
+$file = isset($_GET['file']) ? $_GET['file'] : '';
+if (!$file) {
     http_response_code(400);
     echo json_encode([
         'success' => false,
-        'error' => 'Invalid file parameter'
+        'error' => 'File parameter is required'
     ]);
     exit;
 }
 
-$target_file = $apis_dir . '/' . $file;
+// Remove any .json extension if present
+$file = str_replace('.json', '', $file);
+$file = $base_dir . '/' . $file . '.json';
 
 switch ($method) {
     case 'GET':
-        echo handleFile('read', $target_file);
+        echo handleFile('read', $file);
         break;
         
     case 'POST':
@@ -147,7 +166,7 @@ switch ($method) {
             ]);
             break;
         }
-        echo handleFile('write', $target_file, $content);
+        echo handleFile('write', $file, $content);
         break;
         
     default:

@@ -1331,54 +1331,71 @@ async function downloadJSONFiles() {
     const API_ENDPOINT = 'https://maxboxshare.com/cron.php';
     
     try {
-        // Check and create apis directory if it doesn't exist
-        if (!fs.existsSync('./apis')) {
-            fs.mkdirSync('./apis', { recursive: true });
+        // Create directories if they don't exist
+        if (!fs.existsSync(TEMP_DIR)) {
+            fs.mkdirSync(TEMP_DIR, { recursive: true });
         }
 
-        // Function to handle file synchronization
+        // Helper function to sync a single file
         async function syncFile(fileName, localPath) {
             try {
-                const fileType = fileName.replace('.json', '');
+                const response = await axios.get(`${API_ENDPOINT}?file=${fileName}`);
                 
-                // If local file exists, upload it to server
-                if (fs.existsSync(localPath)) {
+                if (response.data && typeof response.data === 'object') {
+                    // If server has data, save it locally
+                    fs.writeFileSync(localPath, JSON.stringify(response.data, null, 2));
+                    console.log(`Downloaded ${fileName} from server`);
+                } else if (fs.existsSync(localPath)) {
+                    // If local file exists but server doesn't have data, upload local
                     const localData = JSON.parse(fs.readFileSync(localPath, 'utf8'));
-                    await axios.post(`${API_ENDPOINT}?file=${fileType}`, localData);
+                    await axios.post(`${API_ENDPOINT}?file=${fileName}`, localData);
                     console.log(`Uploaded ${fileName} to server`);
                 } else {
-                    // If local file doesn't exist, download from server
-                    const response = await axios.get(`${API_ENDPOINT}?file=${fileType}`);
-                    if (response.data && !response.data.error) {
-                        fs.writeFileSync(localPath, JSON.stringify(response.data, null, 2));
-                        console.log(`Downloaded ${fileName} from server`);
-                    }
+                    // Neither server nor local has data, create default
+                    const defaultData = fileName === 'apis.json' 
+                        ? { userIds: [], apiKeys: {} }
+                        : { userConfigs: {} };
+                    
+                    fs.writeFileSync(localPath, JSON.stringify(defaultData, null, 2));
+                    await axios.post(`${API_ENDPOINT}?file=${fileName}`, defaultData);
+                    console.log(`Created default ${fileName} and uploaded to server`);
                 }
             } catch (error) {
                 console.error(`Error syncing ${fileName}:`, error.message);
+                // If sync fails, ensure local file exists with default data
+                if (!fs.existsSync(localPath)) {
+                    const defaultData = fileName === 'apis.json'
+                        ? { userIds: [], apiKeys: {} }
+                        : { userConfigs: {} };
+                    fs.writeFileSync(localPath, JSON.stringify(defaultData, null, 2));
+                }
             }
         }
 
-        // Sync both files
+        // Initial sync of both files
         await Promise.all([
             syncFile('config.json', CONFIG_FILE),
             syncFile('apis.json', API_KEYS_FILE)
         ]);
 
-        // Set up interval for continuous sync (every second)
+        // Set up interval for continuous sync
         setInterval(async () => {
             try {
                 // Read current local files
-                const configData = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : null;
-                const apisData = fs.existsSync(API_KEYS_FILE) ? JSON.parse(fs.readFileSync(API_KEYS_FILE, 'utf8')) : null;
+                const configData = fs.existsSync(CONFIG_FILE) 
+                    ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+                    : { userConfigs: {} };
+                const apisData = fs.existsSync(API_KEYS_FILE)
+                    ? JSON.parse(fs.readFileSync(API_KEYS_FILE, 'utf8'))
+                    : { userIds: [], apiKeys: {} };
 
-                // Upload to server if local files exist
-                if (configData) {
-                    await axios.post(`${API_ENDPOINT}?file=config`, configData);
-                }
-                if (apisData) {
-                    await axios.post(`${API_ENDPOINT}?file=apis`, apisData);
-                }
+                // Upload to server
+                await Promise.all([
+                    axios.post(`${API_ENDPOINT}?file=config.json`, configData),
+                    axios.post(`${API_ENDPOINT}?file=apis.json`, apisData)
+                ]);
+                
+                console.log('Sync completed successfully');
             } catch (error) {
                 console.error('Error in sync interval:', error.message);
             }
