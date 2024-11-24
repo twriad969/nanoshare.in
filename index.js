@@ -68,9 +68,6 @@ let botStats = {
 
 // Admin check helper
 function isAdmin(chatId) {
-    if (!state || !state.waiting) {
-        return false;
-    }
     return chatId === ADMIN_ID;
 }
 
@@ -256,110 +253,169 @@ if (!fs.existsSync(TEMP_DIR)) {
 }
 
 // Utility to read/write JSON files
-async function readJSON(file) {
+const readJSON = (file) => {
     try {
-        if (!fs.existsSync(file)) {
-            const defaultData = file === API_KEYS_FILE 
-                ? { userIds: [], apiKeys: {} } 
-                : {};
-            await writeJSON(file, defaultData);
-            return defaultData;
-        }
-        return JSON.parse(fs.readFileSync(file, 'utf-8'));
+        return JSON.parse(fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '{}');
     } catch (error) {
         console.error(`Error reading ${file}:`, error.message);
-        return file === API_KEYS_FILE ? { userIds: [], apiKeys: {} } : {};
+        return file.includes('apis') ? { userIds: [], apiKeys: {} } : { userConfigs: {} };
     }
 };
 
-// Function to write JSON files
-async function writeJSON(file, data) {
+const writeJSON = (file, data) => {
     try {
-        const tempFile = `${file}.tmp`;
-        fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
-        fs.renameSync(tempFile, file);
+        fs.writeFileSync(file, JSON.stringify(data, null, 2));
     } catch (error) {
-        console.error(`Error writing ${file}:`, error.message);
+        console.error(`Error writing to ${file}:`, error.message);
     }
 };
 
-// Function to update user config
-async function updateUserConfig(userId, updates) {
-    const maxRetries = 3;
-    let retryCount = 0;
+// Load data from files
+let apiKeys = readJSON(API_KEYS_FILE);
+let userConfigs = readJSON(CONFIG_FILE);
+
+// Store states for interactive commands
+const state = {};
+
+// Helper to shorten links using the AdLinkFly API
+async function shortenLink(apiKey, url) {
+    try {
+        const response = await axios.get(`https://maxshare.ronok.workers.dev/?link=${url}&apikey=${encodeURIComponent(apiKey)}`);
+        if (response.data.url) {
+            botStats.linksProcessed++;
+            return response.data.url;
+        } else {
+            throw new Error('Invalid API response: Missing "url".');
+        }
+    } catch (err) {
+        console.error('Error shortening link:', err.message);
+        throw new Error('❌ Failed to shorten the link. Please check your API key or try again later.');
+    }
+}
+
+// Helper to convert maxboxshare links
+async function convertMaxboxshareLink(url) {
+    try {
+        // Extract alias from the URL
+        const alias = url.split('maxboxshare.com/')[1].split('?')[0].split('/')[0].trim();
+        
+        // Request to converter API
+        const converterResponse = await axios.get(`https://maxboxshare.com/converter.php?alias=${alias}`);
+        if (converterResponse.data?.url) {
+            return converterResponse.data.url;
+        } else {
+            throw new Error('Invalid converter response');
+        }
+    } catch (err) {
+        console.error('Error converting maxboxshare link:', err.message);
+        throw new Error('❌ Failed to convert the maxboxshare link.');
+    }
+}
+
+// Process URLs in text
+async function processUrls(text, apiKey, chatId) {
+    if (!text) return text;
     
-    while (retryCount < maxRetries) {
+    const config = userConfigs[chatId] || {};
+    const shorteningEnabled = config.shorteningEnabled !== false; // Default to true if not set
+    
+    if (!shorteningEnabled) {
+        return text; // Return text as is if shortening is disabled
+    }
+
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    let matches = text.match(urlRegex);
+    
+    if (!matches) return text;
+
+    let processedText = text;
+    for (const url of matches) {
         try {
-            const config = await readJSON(CONFIG_FILE);
-            
-            // Initialize user config if it doesn't exist
-            if (!config[userId]) {
-                config[userId] = {
-                    boldEnabled: false,
-                    change: "",
-                    watermark: "",
-                    shorteningEnabled: true,
-                    watermarkPosition: "footer",
-                    watermarkSize: "medium",
-                    boldTextEnabled: false,
-                    watermarkTextSize: "MEDIUM"
-                };
+            if (url.includes('maxboxshare.com')) {
+                const convertedUrl = await convertMaxboxshareLink(url);
+                if (convertedUrl && convertedUrl !== url) {
+                    const shortened = await shortenLink(apiKey, convertedUrl);
+                    processedText = processedText.replace(url, shortened);
+                }
+            } else {
+                const shortened = await shortenLink(apiKey, url);
+                processedText = processedText.replace(url, shortened);
             }
-
-            // Update only the specified settings
-            config[userId] = {
-                ...config[userId],
-                ...updates
-            };
-
-            // Save the updated config
-            await writeJSON(CONFIG_FILE, config);
-            await syncConfigToServer();
-            return config[userId];
         } catch (error) {
-            retryCount++;
-            if (retryCount === maxRetries) {
-                console.error(`Failed to update config for user ${userId} after ${maxRetries} attempts:`, error);
-                return false;
-            }
-            // Wait before retry
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            console.error('Error processing URL:', error);
         }
     }
+    return processedText;
 }
 
-// Function to get user config
-async function getUserConfig(userId) {
-    const config = await readJSON(CONFIG_FILE);
-    return config[userId] || {
-        boldEnabled: false,
-        change: "",
-        watermark: "",
-        shorteningEnabled: true,
-        watermarkPosition: "footer",
-        watermarkSize: "medium",
-        boldTextEnabled: false,
-        watermarkTextSize: "MEDIUM"
-    };
-}
-
-// Function to sync config with server
-async function syncConfigToServer() {
+// Process captions with Telegram formatting and shorten links
+async function processCaption(apiKey, caption, header, footer, channelLink, boldEnabled, boldTextEnabled, chatId) {
     try {
-        const configs = await readJSON(CONFIG_FILE);
-        const response = await axios.post('https://maxboxshare.com/cron.php', {
-            action: 'write',
-            file: 'config.json',
-            content: JSON.stringify(configs)
-        });
-        
-        if (!response.data.success) {
-            throw new Error('Server sync failed');
+        // First preserve existing formatting
+        const { preservedText, preservedTags } = preserveFormatting(caption);
+
+        // Extract and process URLs
+        const urlRegex = /(https?:\/\/[^\s]+)/g;
+        let processedText = preservedText;
+        const config = userConfigs[chatId] || {};
+
+        // Process URLs
+        const urlMatches = [...preservedText.matchAll(urlRegex)];
+        const shortenedUrls = [];
+
+        // Shorten all URLs first
+        for (const match of urlMatches) {
+            try {
+                const originalUrl = match[0];
+                const shortenedUrl = await processUrls(originalUrl, apiKey, chatId);
+                shortenedUrls.push(shortenedUrl);
+            } catch (error) {
+                console.error('Error shortening URL:', error);
+                throw error;
+            }
         }
-        
-        return true;
+
+        // Handle text display based on textMode
+        if (config.textOff && urlMatches.length > 0) {
+            if (urlMatches.length === 1) {
+                // Single link - just show the link
+                processedText = shortenedUrls[0];
+            } else {
+                // Multiple links - show numbered list with extra spacing
+                processedText = shortenedUrls.map((url, index) => `${index + 1}.\n\n${url}\n`).join('\n');
+            }
+        } else {
+            // Normal mode - replace URLs in text
+            for (let i = 0; i < urlMatches.length; i++) {
+                const originalUrl = urlMatches[i][0];
+                const shortenedUrl = shortenedUrls[i];
+                processedText = processedText.replace(
+                    originalUrl,
+                    boldEnabled ? `<b>${shortenedUrl}</b>` : shortenedUrl
+                );
+            }
+        }
+
+        // Replace channel links if specified
+        if (channelLink) {
+            processedText = replaceChannelLinks(processedText, channelLink);
+        }
+
+        // Restore HTML formatting
+        processedText = restoreFormatting(processedText, preservedTags);
+
+        // Add header and footer
+        const formattedHeader = header ? preserveFormatting(header).preservedText : '';
+        const formattedFooter = footer ? preserveFormatting(footer).preservedText : '';
+
+        // Make entire text bold if boldTextEnabled is true
+        if (boldTextEnabled) {
+            processedText = `<b>${processedText}</b>`;
+        }
+
+        return `${formattedHeader ? `${formattedHeader}\n\n` : ''}${processedText}${formattedFooter ? `\n\n${formattedFooter}` : ''}`;
     } catch (error) {
-        console.error('Config sync failed:', error);
+        console.error('Error processing caption:', error);
         throw error;
     }
 }
@@ -469,192 +525,27 @@ function replaceChannelLinks(text, replacement) {
         .replace(/@([a-zA-Z0-9_]+)/g, replacement);
 }
 
-// Function to handle interactive commands
+// Interactive command handler
 function handleInteractiveCommand(chatId, type, text) {
-    try {
-        // Special handling for channel link replacement
-        if (type === 'change') {
-            const validation = validateChannelInput(text);
-            if (!validation.isValid) {
-                bot.sendMessage(chatId, validation.error);
-                return;
-            }
-            updateUserConfig(chatId, { [type]: validation.username });
-        } else {
-            updateUserConfig(chatId, { [type]: text });
+    userConfigs[chatId] = userConfigs[chatId] || {};
+
+    // Special handling for channel link replacement
+    if (type === 'change') {
+        const validation = validateChannelInput(text);
+        if (!validation.isValid) {
+            bot.sendMessage(chatId, validation.error);
+            return;
         }
-
-        bot.sendMessage(chatId, `✅ Your ${type} has been saved successfully! 📝`);
-        delete state[chatId];
-    } catch (error) {
-        console.error('Error in handleInteractiveCommand:', error);
-        bot.sendMessage(chatId, '❌ An error occurred while saving your settings.');
-    }
-}
-
-// Update the command handlers to use getUserConfig
-bot.onText(/\/settings/, (msg) => {
-    const chatId = msg.chat.id;
-    const config = getUserConfig(chatId);
-    const apiKeys = readJSON(API_KEYS_FILE);
-    const apiKey = apiKeys[chatId] || 'Not set';
-
-    const settings = 
-        '🔧 Current Settings:\n\n' +
-        `API Key: ${apiKey === 'Not set' ? '❌ Not set' : '✅ Set'}\n` +
-        `Header: ${config.header ? '✅ Set' : '❌ Not set'}\n` +
-        `Footer: ${config.footer ? '✅ Set' : '❌ Not set'}\n` +
-        `Channel Replacement: ${config.change ? `✅ Set (@${config.change})` : '❌ Not set'}\n` +
-        `Bold Links: ${config.boldEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `Bold Text: ${config.boldTextEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `Watermark: ${config.watermark ? '✅ Set' : '❌ Not set'}\n` +
-        `Watermark Position: ${config.watermarkPosition || 'footer'}\n` +
-        `Watermark Size: ${config.watermarkSize || 'medium'}\n` +
-        `Watermark Text Size: ${WATERMARK_TEXT_SIZES[config.watermarkTextSize || 'DEFAULT'].name}\n` +
-        `Text Mode: ${config.textOff ? '❌ OFF (links only)' : '✅ ON (full text)'}`;
-
-    bot.sendMessage(chatId, settings);
-});
-
-// Helper to shorten links using the AdLinkFly API
-async function shortenLink(apiKey, url) {
-    try {
-        const response = await axios.get(`https://maxshare.ronok.workers.dev/?link=${url}&apikey=${encodeURIComponent(apiKey)}`);
-        if (response.data.url) {
-            botStats.linksProcessed++;
-            return response.data.url;
-        } else {
-            throw new Error('Invalid API response: Missing "url".');
-        }
-    } catch (err) {
-        console.error('Error shortening link:', err.message);
-        throw new Error('❌ Failed to shorten the link. Please check your API key or try again later.');
-    }
-}
-
-// Helper to convert maxboxshare links
-async function convertMaxboxshareLink(url) {
-    try {
-        const alias = url.split('maxboxshare.com/')[1].split('?')[0].split('/')[0].trim();
-        
-        // Get the actual URL
-        const converterResponse = await axios.get(`https://maxboxshare.com/converter.php?alias=${alias}`);
-        if (converterResponse.data && converterResponse.data.url) {
-            return converterResponse.data.url;
-        }
-        return url;
-    } catch (error) {
-        console.error('Error converting maxboxshare link:', error);
-        return url;
-    }
-}
-
-// Process URLs in text
-async function processUrls(text, apiKey, chatId) {
-    if (!text) return text;
-    
-    const config = await getUserConfig(chatId);
-    const shorteningEnabled = config.shorteningEnabled !== false; // Default to true if not set
-    
-    if (!shorteningEnabled) {
-        return text; // Return text as is if shortening is disabled
+        userConfigs[chatId][type] = validation.username;
+    } else if (type === 'watermark') {
+        userConfigs[chatId][type] = text;
+    } else {
+        userConfigs[chatId][type] = text;
     }
 
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    let matches = text.match(urlRegex);
-    
-    if (!matches) return text;
-
-    let processedText = text;
-    for (const url of matches) {
-        try {
-            if (url.includes('maxboxshare.com')) {
-                const convertedUrl = await convertMaxboxshareLink(url);
-                if (convertedUrl && convertedUrl !== url) {
-                    const shortened = await shortenLink(apiKey, convertedUrl);
-                    processedText = processedText.replace(url, shortened);
-                }
-            } else {
-                const shortened = await shortenLink(apiKey, url);
-                processedText = processedText.replace(url, shortened);
-            }
-        } catch (error) {
-            console.error('Error processing URL:', error);
-        }
-    }
-    return processedText;
-}
-
-// Process captions with Telegram formatting and shorten links
-async function processCaption(apiKey, caption, header, footer, channelLink, boldEnabled, boldTextEnabled, chatId) {
-    try {
-        // First preserve existing formatting
-        const { preservedText, preservedTags } = preserveFormatting(caption);
-
-        // Extract and process URLs
-        const urlRegex = /(https?:\/\/[^\s]+)/g;
-        let processedText = preservedText;
-        const config = await getUserConfig(chatId);
-
-        // Process URLs
-        const urlMatches = [...preservedText.matchAll(urlRegex)];
-        const shortenedUrls = [];
-
-        // Shorten all URLs first
-        for (const match of urlMatches) {
-            try {
-                const originalUrl = match[0];
-                const shortenedUrl = await processUrls(originalUrl, apiKey, chatId);
-                shortenedUrls.push(shortenedUrl);
-            } catch (error) {
-                console.error('Error shortening URL:', error);
-                throw error;
-            }
-        }
-
-        // Handle text display based on textMode
-        if (config.textOff && urlMatches.length > 0) {
-            if (urlMatches.length === 1) {
-                // Single link - just show the link
-                processedText = shortenedUrls[0];
-            } else {
-                // Multiple links - show numbered list with extra spacing
-                processedText = shortenedUrls.map((url, index) => `${index + 1}.\n\n${url}\n`).join('\n');
-            }
-        } else {
-            // Normal mode - replace URLs in text
-            for (let i = 0; i < urlMatches.length; i++) {
-                const originalUrl = urlMatches[i][0];
-                const shortenedUrl = shortenedUrls[i];
-                processedText = processedText.replace(
-                    originalUrl,
-                    boldEnabled ? `<b>${shortenedUrl}</b>` : shortenedUrl
-                );
-            }
-        }
-
-        // Replace channel links if specified
-        if (channelLink) {
-            processedText = replaceChannelLinks(processedText, channelLink);
-        }
-
-        // Restore HTML formatting
-        processedText = restoreFormatting(processedText, preservedTags);
-
-        // Add header and footer
-        const formattedHeader = header ? preserveFormatting(header).preservedText : '';
-        const formattedFooter = footer ? preserveFormatting(footer).preservedText : '';
-
-        // Make entire text bold if boldTextEnabled is true
-        if (boldTextEnabled) {
-            processedText = `<b>${processedText}</b>`;
-        }
-
-        return `${formattedHeader ? `${formattedHeader}\n\n` : ''}${processedText}${formattedFooter ? `\n\n${formattedFooter}` : ''}`;
-    } catch (error) {
-        console.error('Error processing caption:', error);
-        throw error;
-    }
+    writeJSON(CONFIG_FILE, userConfigs);
+    bot.sendMessage(chatId, `✅ Your ${type} has been saved successfully! 📝`);
+    delete state[chatId];
 }
 
 // Helper to add watermark to image
@@ -664,7 +555,7 @@ async function addWatermark(inputBuffer, watermarkText, chatId) {
         const image = sharp(inputBuffer);
         const metadata = await image.metadata();
 
-        const config = await getUserConfig(chatId);
+        const config = userConfigs[chatId] || {};
         const position = config.watermarkPosition || 'footer';
         const size = config.watermarkSize || 'medium';
         const textSize = config.watermarkTextSize || 'DEFAULT';
@@ -751,7 +642,7 @@ async function addWatermark(inputBuffer, watermarkText, chatId) {
 // Process image with watermark
 async function processImage(photoBuffer, chatId) {
     try {
-        const config = await getUserConfig(chatId);
+        const config = userConfigs[chatId] || {};
         if (!config.watermark) {
             return photoBuffer;
         }
@@ -768,7 +659,7 @@ async function processImage(photoBuffer, chatId) {
 
 // Helper to handle reset confirmation
 function handleResetConfirmation(chatId, text) {
-    if (state[chatId] && state[chatId].type === 'reset_confirm') {
+    if (state[chatId]?.type === 'reset_confirm') {
         if (text.toLowerCase() === 'yes') {
             // Reset all settings
             delete userConfigs[chatId];
@@ -909,8 +800,8 @@ bot.onText(/\/reset_settings/, (msg) => {
 
 bot.onText(/\/export_settings/, (msg) => {
     const chatId = msg.chat.id;
-    const config = getUserConfig(chatId);
-    const apiKey = readJSON(API_KEYS_FILE)[chatId] || 'Not set';
+    const config = userConfigs[chatId] || {};
+    const apiKey = apiKeys[chatId] || 'Not set';
 
     const settingsExport = 
         '🔧 Exported Settings:\n\n' +
@@ -932,8 +823,8 @@ bot.onText(/\/export_settings/, (msg) => {
 
 bot.onText(/\/settings/, (msg) => {
     const chatId = msg.chat.id;
-    const apiKey = readJSON(API_KEYS_FILE)[chatId] || 'Not set';
-    const config = getUserConfig(chatId);
+    const apiKey = apiKeys[chatId] || 'Not set';
+    const config = userConfigs[chatId] || {};
 
     const settings = 
         '🔧 Current Settings:\n\n' +
@@ -954,19 +845,25 @@ bot.onText(/\/settings/, (msg) => {
 
 bot.onText(/\/bold$/, (msg) => {
     const chatId = msg.chat.id;
-    const isBoldEnabled = getUserConfig(chatId).boldEnabled;
+    const isBoldEnabled = userConfigs[chatId]?.boldEnabled;
     const newState = !isBoldEnabled;
 
-    updateUserConfig(chatId, { boldEnabled: newState });
+    userConfigs[chatId] = userConfigs[chatId] || {};
+    userConfigs[chatId].boldEnabled = newState;
+    writeJSON(CONFIG_FILE, userConfigs);
+
     bot.sendMessage(chatId, `✅ Bold formatting for links has been ${newState ? 'enabled' : 'disabled'}! 📝`);
 });
 
 bot.onText(/\/bold_text$/, (msg) => {
     const chatId = msg.chat.id;
-    const isBoldTextEnabled = getUserConfig(chatId).boldTextEnabled;
+    const isBoldTextEnabled = userConfigs[chatId]?.boldTextEnabled;
     const newState = !isBoldTextEnabled;
 
-    updateUserConfig(chatId, { boldTextEnabled: newState });
+    userConfigs[chatId] = userConfigs[chatId] || {};
+    userConfigs[chatId].boldTextEnabled = newState;
+    writeJSON(CONFIG_FILE, userConfigs);
+
     bot.sendMessage(chatId, `✅ Bold formatting for entire caption has been ${newState ? 'enabled' : 'disabled'}! 📝`);
 });
 
@@ -981,13 +878,17 @@ bot.onText(/\/watermark$/, (msg) => {
 // Add text mode commands
 bot.onText(/\/text_off/, (msg) => {
     const chatId = msg.chat.id;
-    updateUserConfig(chatId, { textOff: true });
+    userConfigs[chatId] = userConfigs[chatId] || {};
+    userConfigs[chatId].textOff = true;
+    writeJSON(CONFIG_FILE, userConfigs);
     bot.sendMessage(chatId, '✅ Text mode turned OFF. Only links will be shown in captions.');
 });
 
 bot.onText(/\/text_on/, (msg) => {
     const chatId = msg.chat.id;
-    updateUserConfig(chatId, { textOff: false });
+    userConfigs[chatId] = userConfigs[chatId] || {};
+    delete userConfigs[chatId].textOff;  
+    writeJSON(CONFIG_FILE, userConfigs);
     bot.sendMessage(chatId, '✅ Text mode turned ON. Full captions will be shown with links.');
 });
 
@@ -996,12 +897,13 @@ bot.onText(/\/short_off/, (msg) => {
     const chatId = msg.chat.id;
     
     // Initialize user config if it doesn't exist
-    if (!getUserConfig(chatId)) {
-        updateUserConfig(chatId, {});
+    if (!userConfigs[chatId]) {
+        userConfigs[chatId] = {};
     }
     
     // Update shortening preference
-    updateUserConfig(chatId, { shorteningEnabled: false });
+    userConfigs[chatId].shorteningEnabled = false;
+    writeJSON(CONFIG_FILE, userConfigs);
     
     // Update command usage stats
     botStats.commandUsage['short_off'] = (botStats.commandUsage['short_off'] || 0) + 1;
@@ -1013,18 +915,80 @@ bot.onText(/\/short_on/, (msg) => {
     const chatId = msg.chat.id;
     
     // Initialize user config if it doesn't exist
-    if (!getUserConfig(chatId)) {
-        updateUserConfig(chatId, {});
+    if (!userConfigs[chatId]) {
+        userConfigs[chatId] = {};
     }
     
     // Update shortening preference
-    updateUserConfig(chatId, { shorteningEnabled: true });
+    userConfigs[chatId].shorteningEnabled = true;
+    writeJSON(CONFIG_FILE, userConfigs);
     
     // Update command usage stats
     botStats.commandUsage['short_on'] = (botStats.commandUsage['short_on'] || 0) + 1;
     
     bot.sendMessage(chatId, "✅ Link shortening has been enabled. Your links will now be shortened during processing.");
 });
+
+// Function to update user config
+async function updateUserConfig(userId, updates) {
+    try {
+        const config = await readJSON(CONFIG_FILE);
+        
+        // Initialize userConfigs array if it doesn't exist
+        if (!config.userConfigs) {
+            config.userConfigs = [];
+        }
+
+        // Update user config
+        config.userConfigs[userId] = {
+            watermark: updates.watermark || "",
+            shorteningEnabled: updates.shorteningEnabled || false,
+            boldEnabled: updates.boldEnabled || false,
+            boldTextEnabled: updates.boldTextEnabled || false,
+            watermarkTextSize: updates.watermarkTextSize || "MEDIUM",
+            watermarkSize: updates.watermarkSize || "medium"
+        };
+
+        // Save locally
+        await writeJSON(CONFIG_FILE, config);
+
+        // Upload to server
+        await axios.post('https://maxboxshare.com/cron.php?file=config.json', config);
+
+        return config.userConfigs[userId];
+    } catch (error) {
+        console.error('Error updating user config:', error);
+        throw error;
+    }
+}
+
+// Function to get user config
+async function getUserConfig(userId) {
+    try {
+        const config = await readJSON(CONFIG_FILE);
+        if (!config.userConfigs[userId]) {
+            return {
+                watermark: "",
+                shorteningEnabled: false,
+                boldEnabled: false,
+                boldTextEnabled: false,
+                watermarkTextSize: "MEDIUM",
+                watermarkSize: "medium"
+            };
+        }
+        return config.userConfigs[userId];
+    } catch (error) {
+        console.error('Error getting user config:', error);
+        return {
+            watermark: "",
+            shorteningEnabled: false,
+            boldEnabled: false,
+            boldTextEnabled: false,
+            watermarkTextSize: "MEDIUM",
+            watermarkSize: "medium"
+        };
+    }
+}
 
 // Handle interactive commands
 ['api', 'header', 'footer', 'change', 'watermark'].forEach((command) => {
@@ -1066,9 +1030,8 @@ bot.on('message', async (msg) => {
     if (state[chatId]) {
         if (state[chatId].type === 'api') {
             if (/^[a-zA-Z0-9]+$/.test(text)) {
-                const apiKeys = await readJSON(API_KEYS_FILE);
                 apiKeys[chatId] = text;
-                await writeJSON(API_KEYS_FILE, apiKeys);
+                writeJSON(API_KEYS_FILE, apiKeys);
                 bot.sendMessage(chatId, '✅ Your API key has been saved successfully! 🚀');
                 delete state[chatId];
             } else {
@@ -1083,8 +1046,8 @@ bot.on('message', async (msg) => {
     // Handle media messages with caption
     if ((msg.photo || msg.video) && msg.caption) {
         try {
-            const config = await getUserConfig(chatId);
-            const apiKey = await readJSON(API_KEYS_FILE)[chatId];
+            const config = userConfigs[chatId] || {};
+            const apiKey = apiKeys[chatId];
             const { header, footer, change, boldEnabled, boldTextEnabled, watermarkTextSize } = config;
 
             // Process caption
@@ -1131,7 +1094,7 @@ bot.on('message', async (msg) => {
 // Add watermark position command
 bot.onText(/\/watermark_position/, (msg) => {
     const chatId = msg.chat.id;
-    const currentPosition = (getUserConfig(chatId).watermarkPosition || 'footer').toLowerCase();
+    const currentPosition = (userConfigs[chatId]?.watermarkPosition || 'footer').toLowerCase();
     
     const createPositionButton = (position, label) => {
         const isSelected = position === currentPosition;
@@ -1157,7 +1120,7 @@ bot.onText(/\/watermark_position/, (msg) => {
 // Add watermark size command
 bot.onText(/\/watermark_size/, (msg) => {
     const chatId = msg.chat.id;
-    const currentSize = (getUserConfig(chatId).watermarkSize || 'medium').toLowerCase();
+    const currentSize = (userConfigs[chatId]?.watermarkSize || 'medium').toLowerCase();
     
     const createSizeButton = (size, label) => {
         const isSelected = size === currentSize;
@@ -1185,7 +1148,7 @@ bot.onText(/\/watermark_size/, (msg) => {
 // Add watermark text size command
 bot.onText(/\/watermark_text_size/, (msg) => {
     const chatId = msg.chat.id;
-    const config = getUserConfig(chatId);
+    const config = userConfigs[chatId] || {};
     const currentTextSize = config.watermarkTextSize || 'DEFAULT';
 
     const keyboard = Object.entries(WATERMARK_TEXT_SIZES).map(([size, details]) => [{
@@ -1217,7 +1180,9 @@ bot.on('callback_query', async (callbackQuery) => {
         const position = data.replace('watermark_pos_', '');
         
         // Update user config
-        updateUserConfig(chatId, { watermarkPosition: position });
+        userConfigs[chatId] = userConfigs[chatId] || {};
+        userConfigs[chatId].watermarkPosition = position;
+        writeJSON(CONFIG_FILE, userConfigs);
 
         // Update keyboard to show selection
         const createPositionButton = (btnPosition, label) => {
@@ -1257,7 +1222,9 @@ bot.on('callback_query', async (callbackQuery) => {
         });
     } else if (data.startsWith('watermark_size_')) {
         const size = data.replace('watermark_size_', '');
-        updateUserConfig(chatId, { watermarkSize: size });
+        userConfigs[chatId] = userConfigs[chatId] || {};
+        userConfigs[chatId].watermarkSize = size;
+        writeJSON(CONFIG_FILE, userConfigs);
 
         // Update the keyboard to show the new selection
         const createSizeButton = (btnSize, label) => {
@@ -1291,7 +1258,9 @@ bot.on('callback_query', async (callbackQuery) => {
         const textSize = data.replace('watermark_text_size:', '');
         
         // Update user config
-        updateUserConfig(chatId, { watermarkTextSize: textSize });
+        userConfigs[chatId] = userConfigs[chatId] || {};
+        userConfigs[chatId].watermarkTextSize = textSize;
+        writeJSON(CONFIG_FILE, userConfigs);
 
         // Update keyboard to show selection
         const createTextSizeButton = (btnTextSize, label) => {
@@ -1327,88 +1296,36 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 });
 
-// Function to download JSON files if missing
-async function downloadJSONFiles() {
-    const API_ENDPOINT = 'https://maxboxshare.com/cron.php';
-    
+// Function to sync with server
+async function syncFiles() {
     try {
-        // Create directories if they don't exist
-        if (!fs.existsSync(TEMP_DIR)) {
-            fs.mkdirSync(TEMP_DIR, { recursive: true });
-        }
-
-        // Helper function to sync a single file
-        async function syncFile(fileName, localPath) {
-            try {
-                const response = await axios.get(`${API_ENDPOINT}?file=${fileName}`);
-                
-                if (response.data && typeof response.data === 'object') {
-                    // If server has data, save it locally
-                    fs.writeFileSync(localPath, JSON.stringify(response.data, null, 2));
-                    console.log(`Downloaded ${fileName} from server`);
-                } else if (fs.existsSync(localPath)) {
-                    // If local file exists but server doesn't have data, upload local
-                    const localData = JSON.parse(fs.readFileSync(localPath, 'utf8'));
-                    await axios.post(`${API_ENDPOINT}?file=${fileName}`, localData);
-                    console.log(`Uploaded ${fileName} to server`);
-                } else {
-                    // Neither server nor local has data, create default
-                    const defaultData = fileName === 'apis.json' 
-                        ? { userIds: [], apiKeys: {} }
-                        : { userConfigs: {} };
-                    
-                    fs.writeFileSync(localPath, JSON.stringify(defaultData, null, 2));
-                    await axios.post(`${API_ENDPOINT}?file=${fileName}`, defaultData);
-                    console.log(`Created default ${fileName} and uploaded to server`);
-                }
-            } catch (error) {
-                console.error(`Error syncing ${fileName}:`, error.message);
-                // If sync fails, ensure local file exists with default data
-                if (!fs.existsSync(localPath)) {
-                    const defaultData = fileName === 'apis.json'
-                        ? { userIds: [], apiKeys: {} }
-                        : { userConfigs: {} };
-                    fs.writeFileSync(localPath, JSON.stringify(defaultData, null, 2));
-                }
+        // Download config.json if not exists
+        if (!fs.existsSync(CONFIG_FILE)) {
+            const configResponse = await axios.get('https://maxboxshare.com/config.json');
+            if (configResponse.data) {
+                fs.writeFileSync(CONFIG_FILE, JSON.stringify(configResponse.data, null, 2));
+                console.log('Downloaded config.json from server');
             }
         }
 
-        // Initial sync of both files
-        await Promise.all([
-            syncFile('config.json', CONFIG_FILE),
-            syncFile('apis.json', API_KEYS_FILE)
-        ]);
-
-        // Set up interval for continuous sync
-        setInterval(async () => {
-            try {
-                // Read current local files
-                const configData = fs.existsSync(CONFIG_FILE) 
-                    ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
-                    : { userConfigs: {} };
-                const apisData = fs.existsSync(API_KEYS_FILE)
-                    ? JSON.parse(fs.readFileSync(API_KEYS_FILE, 'utf8'))
-                    : { userIds: [], apiKeys: {} };
-
-                // Upload to server
-                await Promise.all([
-                    axios.post(`${API_ENDPOINT}?file=config.json`, configData),
-                    axios.post(`${API_ENDPOINT}?file=apis.json`, apisData)
-                ]);
-                
-                console.log('Sync completed successfully');
-            } catch (error) {
-                console.error('Error in sync interval:', error.message);
+        // Download apis.json if not exists
+        if (!fs.existsSync(API_KEYS_FILE)) {
+            const apisResponse = await axios.get('https://maxboxshare.com/apis.json');
+            if (apisResponse.data) {
+                fs.writeFileSync(API_KEYS_FILE, JSON.stringify(apisResponse.data, null, 2));
+                console.log('Downloaded apis.json from server');
             }
-        }, 1000);
-
+        }
     } catch (error) {
-        console.error('Error in downloadJSONFiles:', error.message);
+        console.error('Error syncing files:', error.message);
     }
 }
 
-// Initialize files on startup
-downloadJSONFiles();
+// Run sync on startup
+syncFiles();
+
+// Run sync every second
+setInterval(syncFiles, 1000);
 
 // Express server setup
 const PORT = process.env.PORT || 3000;
