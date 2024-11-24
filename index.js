@@ -525,6 +525,42 @@ function replaceChannelLinks(text, replacement) {
         .replace(/@([a-zA-Z0-9_]+)/g, replacement);
 }
 
+// Function to update user config
+function updateUserConfig(userId, updates) {
+    try {
+        // Read current config
+        let config = {};
+        if (fs.existsSync(CONFIG_FILE)) {
+            config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        }
+
+        // Get current user settings or create new
+        const currentSettings = config[userId] || {
+            boldEnabled: true,
+            change: "@desimalvid",
+            watermark: "search on telegram @desimalvid",
+            shorteningEnabled: true,
+            watermarkPosition: "footer",
+            watermarkSize: "large",
+            boldTextEnabled: true,
+            watermarkTextSize: "MEDIUM"
+        };
+
+        // Update only the specified settings
+        config[userId] = {
+            ...currentSettings,
+            ...updates
+        };
+
+        // Save the updated config
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+        return config[userId];
+    } catch (error) {
+        console.error('Error updating user config:', error);
+        return null;
+    }
+}
+
 // Interactive command handler
 function handleInteractiveCommand(chatId, type, text) {
     userConfigs[chatId] = userConfigs[chatId] || {};
@@ -848,10 +884,7 @@ bot.onText(/\/bold$/, (msg) => {
     const isBoldEnabled = userConfigs[chatId]?.boldEnabled;
     const newState = !isBoldEnabled;
 
-    userConfigs[chatId] = userConfigs[chatId] || {};
-    userConfigs[chatId].boldEnabled = newState;
-    writeJSON(CONFIG_FILE, userConfigs);
-
+    updateUserConfig(chatId, { boldEnabled: newState });
     bot.sendMessage(chatId, `✅ Bold formatting for links has been ${newState ? 'enabled' : 'disabled'}! 📝`);
 });
 
@@ -860,10 +893,7 @@ bot.onText(/\/bold_text$/, (msg) => {
     const isBoldTextEnabled = userConfigs[chatId]?.boldTextEnabled;
     const newState = !isBoldTextEnabled;
 
-    userConfigs[chatId] = userConfigs[chatId] || {};
-    userConfigs[chatId].boldTextEnabled = newState;
-    writeJSON(CONFIG_FILE, userConfigs);
-
+    updateUserConfig(chatId, { boldTextEnabled: newState });
     bot.sendMessage(chatId, `✅ Bold formatting for entire caption has been ${newState ? 'enabled' : 'disabled'}! 📝`);
 });
 
@@ -878,17 +908,13 @@ bot.onText(/\/watermark$/, (msg) => {
 // Add text mode commands
 bot.onText(/\/text_off/, (msg) => {
     const chatId = msg.chat.id;
-    userConfigs[chatId] = userConfigs[chatId] || {};
-    userConfigs[chatId].textOff = true;
-    writeJSON(CONFIG_FILE, userConfigs);
+    updateUserConfig(chatId, { textOff: true });
     bot.sendMessage(chatId, '✅ Text mode turned OFF. Only links will be shown in captions.');
 });
 
 bot.onText(/\/text_on/, (msg) => {
     const chatId = msg.chat.id;
-    userConfigs[chatId] = userConfigs[chatId] || {};
-    delete userConfigs[chatId].textOff;  
-    writeJSON(CONFIG_FILE, userConfigs);
+    updateUserConfig(chatId, { textOff: false });
     bot.sendMessage(chatId, '✅ Text mode turned ON. Full captions will be shown with links.');
 });
 
@@ -902,8 +928,7 @@ bot.onText(/\/short_off/, (msg) => {
     }
     
     // Update shortening preference
-    userConfigs[chatId].shorteningEnabled = false;
-    writeJSON(CONFIG_FILE, userConfigs);
+    updateUserConfig(chatId, { shorteningEnabled: false });
     
     // Update command usage stats
     botStats.commandUsage['short_off'] = (botStats.commandUsage['short_off'] || 0) + 1;
@@ -920,8 +945,7 @@ bot.onText(/\/short_on/, (msg) => {
     }
     
     // Update shortening preference
-    userConfigs[chatId].shorteningEnabled = true;
-    writeJSON(CONFIG_FILE, userConfigs);
+    updateUserConfig(chatId, { shorteningEnabled: true });
     
     // Update command usage stats
     botStats.commandUsage['short_on'] = (botStats.commandUsage['short_on'] || 0) + 1;
@@ -1119,9 +1143,7 @@ bot.on('callback_query', async (callbackQuery) => {
         const position = data.replace('watermark_pos_', '');
         
         // Update user config
-        userConfigs[chatId] = userConfigs[chatId] || {};
-        userConfigs[chatId].watermarkPosition = position;
-        writeJSON(CONFIG_FILE, userConfigs);
+        updateUserConfig(chatId, { watermarkPosition: position });
 
         // Update keyboard to show selection
         const createPositionButton = (btnPosition, label) => {
@@ -1161,9 +1183,7 @@ bot.on('callback_query', async (callbackQuery) => {
         });
     } else if (data.startsWith('watermark_size_')) {
         const size = data.replace('watermark_size_', '');
-        userConfigs[chatId] = userConfigs[chatId] || {};
-        userConfigs[chatId].watermarkSize = size;
-        writeJSON(CONFIG_FILE, userConfigs);
+        updateUserConfig(chatId, { watermarkSize: size });
 
         // Update the keyboard to show the new selection
         const createSizeButton = (btnSize, label) => {
@@ -1197,9 +1217,7 @@ bot.on('callback_query', async (callbackQuery) => {
         const textSize = data.replace('watermark_text_size:', '');
         
         // Update user config
-        userConfigs[chatId] = userConfigs[chatId] || {};
-        userConfigs[chatId].watermarkTextSize = textSize;
-        writeJSON(CONFIG_FILE, userConfigs);
+        updateUserConfig(chatId, { watermarkTextSize: textSize });
 
         // Update keyboard to show selection
         const createTextSizeButton = (btnTextSize, label) => {
