@@ -17,8 +17,11 @@ A Telegram bot that processes images with watermarks and handles link shortening
 
 - Node.js >= 14.0.0
 - NPM or Yarn package manager
+- Docker (optional, for containerized deployment)
 
 ## Installation
+
+### Standard Installation
 
 1. Clone the repository:
 ```bash
@@ -39,24 +42,81 @@ npm install
    - Get a token from [@BotFather](https://t.me/botfather)
    - Update the `BOT_TOKEN` in `index.js`
 
+### Docker Installation
+
+1. Clone the repository:
+```bash
+git clone [your-repository-url]
+cd [repository-name]
+```
+
+2. Build and run with Docker Compose:
+```bash
+docker-compose up -d
+```
+
+Or build and run manually:
+```bash
+docker build -t telegram-watermark-bot .
+docker run -d \
+  -e BOT_TOKEN=your_token \
+  -e ADMIN_ID=your_admin_id \
+  telegram-watermark-bot
+```
+
 ## Running the Bot
 
-### Development
+### Standard Mode
+
+#### Development
 ```bash
 npm run dev
 ```
 
-### Production
+#### Production
 ```bash
 npm start
 ```
 
-### Using PM2 (Recommended for 24/7 operation)
+#### Using PM2 (Recommended for 24/7 operation)
 ```bash
 npm run pm2
 ```
 
+### Docker Mode
+
+#### Using Docker Compose (Recommended)
+```bash
+# Start the bot
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the bot
+docker-compose down
+```
+
+#### Using Docker directly
+```bash
+# Build the image
+docker build -t telegram-watermark-bot .
+
+# Run the container
+docker run -d \
+  -e BOT_TOKEN=your_token \
+  -e ADMIN_ID=your_admin_id \
+  telegram-watermark-bot
+```
+
 ## Configuration
+
+### Environment Variables
+```env
+BOT_TOKEN=your_telegram_bot_token_here
+ADMIN_ID=your_admin_telegram_id_here
+PORT=3000 (optional)
+```
 
 ### apis.json structure:
 ```json
@@ -71,6 +131,21 @@ npm run pm2
 {
   "userConfigs": {}
 }
+```
+
+## Deployment Platforms
+
+### Back4app
+1. Create a new container app
+2. Push this repository to Back4app
+3. Set the required environment variables
+4. Deploy using the provided Dockerfile
+
+### Heroku
+Use the provided Procfile for deployment:
+```bash
+heroku create
+git push heroku main
 ```
 
 ## License

@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID}
+      - PORT=${PORT:-3000}
+    volumes:
+      - bot-temp:/usr/src/app/temp
+    restart: unless-stopped
+
+volumes:
+  bot-temp:
