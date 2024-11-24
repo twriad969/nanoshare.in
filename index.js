@@ -68,6 +68,9 @@ let botStats = {
 
 // Admin check helper
 function isAdmin(chatId) {
+    if (!state || !state.waiting) {
+        return false;
+    }
     return chatId === ADMIN_ID;
 }
 
@@ -532,19 +535,17 @@ async function shortenLink(apiKey, url) {
 // Helper to convert maxboxshare links
 async function convertMaxboxshareLink(url) {
     try {
-        // Extract alias from the URL
         const alias = url.split('maxboxshare.com/')[1].split('?')[0].split('/')[0].trim();
         
-        // Request to converter API
+        // Get the actual URL
         const converterResponse = await axios.get(`https://maxboxshare.com/converter.php?alias=${alias}`);
-        if (converterResponse.data?.url) {
+        if (converterResponse.data && converterResponse.data.url) {
             return converterResponse.data.url;
-        } else {
-            throw new Error('Invalid converter response');
         }
-    } catch (err) {
-        console.error('Error converting maxboxshare link:', err.message);
-        throw new Error('❌ Failed to convert the maxboxshare link.');
+        return url;
+    } catch (error) {
+        console.error('Error converting maxboxshare link:', error);
+        return url;
     }
 }
 
@@ -767,7 +768,7 @@ async function processImage(photoBuffer, chatId) {
 
 // Helper to handle reset confirmation
 function handleResetConfirmation(chatId, text) {
-    if (state[chatId]?.type === 'reset_confirm') {
+    if (state[chatId] && state[chatId].type === 'reset_confirm') {
         if (text.toLowerCase() === 'yes') {
             // Reset all settings
             delete userConfigs[chatId];
