@@ -560,24 +560,18 @@ async function addWatermark(inputBuffer, watermarkText, chatId) {
             const image = sharp(inputBuffer);
             const metadata = await image.metadata();
 
-            // Create text overlay
+            // Create text overlay with white background and black text
             const svgText = `
                 <svg width="${metadata.width}" height="${size.height}">
+                    <rect width="100%" height="100%" fill="white"/>
                     <style>
                         .text {
-                            fill: white;
-                            font-size: ${textSize.fontSize}px;
-                            font-family: 'Liberation Sans', Arial, sans-serif;
-                            font-weight: bold;
-                        }
-                        .shadow {
                             fill: black;
                             font-size: ${textSize.fontSize}px;
                             font-family: 'Liberation Sans', Arial, sans-serif;
                             font-weight: bold;
                         }
                     </style>
-                    <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" class="shadow" dx="2" dy="2">${watermarkText}</text>
                     <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" class="text">${watermarkText}</text>
                 </svg>`;
 
