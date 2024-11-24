@@ -8,6 +8,7 @@ $base_dir = __DIR__;
 $apis_dir = $base_dir . '/apis';
 $config_file = $apis_dir . '/config.json';
 $apis_file = $apis_dir . '/apis.json';
+$lock_file = $apis_dir . '/sync.lock';
 
 // Create directory if it doesn't exist
 if (!file_exists($apis_dir)) {
@@ -20,9 +21,28 @@ $default_data = [
     'apis.json' => ['userIds' => [], 'apiKeys' => []]
 ];
 
-// Function to handle file operations
+// Function to acquire a lock
+function acquireLock($lock_file, $timeout = 10) {
+    $start = time();
+    while (!mkdir($lock_file, 0777)) {
+        if (time() - $start > $timeout) {
+            return false;
+        }
+        usleep(100000); // Sleep for 0.1 seconds
+    }
+    return true;
+}
+
+// Function to release lock
+function releaseLock($lock_file) {
+    if (is_dir($lock_file)) {
+        rmdir($lock_file);
+    }
+}
+
+// Function to handle file operations with locking
 function handleFile($action, $file, $content = null) {
-    global $apis_dir, $default_data;
+    global $apis_dir, $default_data, $lock_file;
     
     // Ensure directory exists
     if (!file_exists($apis_dir)) {
@@ -31,28 +51,68 @@ function handleFile($action, $file, $content = null) {
     
     $filename = basename($file);
     
-    switch($action) {
-        case 'read':
-            if (file_exists($file)) {
-                return file_get_contents($file);
-            } else {
-                // Create default file if it doesn't exist
-                $default_content = json_encode($default_data[$filename], JSON_PRETTY_PRINT);
-                file_put_contents($file, $default_content);
-                return $default_content;
-            }
-        
-        case 'write':
-            if ($content) {
-                // Ensure valid JSON
-                $decoded = json_decode($content);
-                if (json_last_error() === JSON_ERROR_NONE) {
-                    file_put_contents($file, json_encode(json_decode($content), JSON_PRETTY_PRINT));
+    // Acquire lock
+    if (!acquireLock($lock_file)) {
+        http_response_code(503);
+        return json_encode([
+            'success' => false,
+            'error' => 'Could not acquire lock. Please try again.'
+        ]);
+    }
+    
+    try {
+        switch($action) {
+            case 'read':
+                if (file_exists($file)) {
+                    $content = file_get_contents($file);
+                    if ($content === false) {
+                        throw new Exception("Failed to read file");
+                    }
+                    return $content;
+                } else {
+                    // Create default file if it doesn't exist
+                    $default_content = json_encode($default_data[$filename], JSON_PRETTY_PRINT);
+                    if (file_put_contents($file, $default_content) === false) {
+                        throw new Exception("Failed to create default file");
+                    }
+                    return $default_content;
+                }
+            
+            case 'write':
+                if ($content) {
+                    // Ensure valid JSON
+                    $decoded = json_decode($content);
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        throw new Exception("Invalid JSON content");
+                    }
+                    
+                    // Write to temporary file first
+                    $temp_file = $file . '.tmp';
+                    if (file_put_contents($temp_file, json_encode($decoded, JSON_PRETTY_PRINT)) === false) {
+                        throw new Exception("Failed to write temporary file");
+                    }
+                    
+                    // Rename temp file to target (atomic operation)
+                    if (!rename($temp_file, $file)) {
+                        unlink($temp_file);
+                        throw new Exception("Failed to update file");
+                    }
+                    
                     return json_encode(['success' => true]);
                 }
-                return json_encode(['error' => 'Invalid JSON provided']);
-            }
-            return json_encode(['error' => 'No content provided']);
+                throw new Exception("No content provided");
+                
+            default:
+                throw new Exception("Invalid action");
+        }
+    } catch (Exception $e) {
+        http_response_code(500);
+        return json_encode([
+            'success' => false,
+            'error' => $e->getMessage()
+        ]);
+    } finally {
+        releaseLock($lock_file);
     }
 }
 
@@ -60,27 +120,40 @@ function handleFile($action, $file, $content = null) {
 $method = $_SERVER['REQUEST_METHOD'];
 $file = isset($_GET['file']) ? $_GET['file'] : '';
 
-switch($method) {
+// Validate file parameter
+if (!$file || !in_array($file, ['config.json', 'apis.json'])) {
+    http_response_code(400);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Invalid file parameter'
+    ]);
+    exit;
+}
+
+$target_file = $apis_dir . '/' . $file;
+
+switch ($method) {
     case 'GET':
-        if ($file === 'config' || $file === 'apis') {
-            $target_file = $file === 'config' ? $config_file : $apis_file;
-            echo handleFile('read', $target_file);
-        } else {
-            echo json_encode(['error' => 'Invalid file specified']);
-        }
+        echo handleFile('read', $target_file);
         break;
         
     case 'POST':
         $content = file_get_contents('php://input');
-        if ($file === 'config' || $file === 'apis') {
-            $target_file = $file === 'config' ? $config_file : $apis_file;
-            echo handleFile('write', $target_file, $content);
-        } else {
-            echo json_encode(['error' => 'Invalid file specified']);
+        if (!$content) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'error' => 'No content provided'
+            ]);
+            break;
         }
+        echo handleFile('write', $target_file, $content);
         break;
         
     default:
-        echo json_encode(['error' => 'Invalid method']);
-        break;
+        http_response_code(405);
+        echo json_encode([
+            'success' => false,
+            'error' => 'Method not allowed'
+        ]);
 }
