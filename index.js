@@ -274,6 +274,12 @@ const writeJSON = (file, data) => {
 let apiKeys = readJSON(API_KEYS_FILE);
 let userConfigs = readJSON(CONFIG_FILE);
 
+// Function to reload configurations from files
+function reloadConfigs() {
+    apiKeys = readJSON(API_KEYS_FILE);
+    userConfigs = readJSON(CONFIG_FILE);
+}
+
 // Store states for interactive commands
 const state = {};
 
@@ -823,24 +829,24 @@ bot.onText(/\/export_settings/, (msg) => {
 
 bot.onText(/\/settings/, (msg) => {
     const chatId = msg.chat.id;
+    const settings = getUserSettings(chatId);
     const apiKey = apiKeys[chatId] || 'Not set';
-    const config = userConfigs[chatId] || {};
 
-    const settings = 
+    const settings_message = 
         '🔧 Current Settings:\n\n' +
         `API Key: ${apiKey === 'Not set' ? '❌ Not set' : '✅ Set'}\n` +
-        `Header: ${config.header ? '✅ Set' : '❌ Not set'}\n` +
-        `Footer: ${config.footer ? '✅ Set' : '❌ Not set'}\n` +
-        `Channel Replacement: ${config.change ? `✅ Set (@${config.change})` : '❌ Not set'}\n` +
-        `Bold Links: ${config.boldEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `Bold Text: ${config.boldTextEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `Watermark: ${config.watermark ? '✅ Set' : '❌ Not set'}\n` +
-        `Watermark Position: ${config.watermarkPosition || 'footer'}\n` +
-        `Watermark Size: ${config.watermarkSize || 'medium'}\n` +
-        `Watermark Text Size: ${WATERMARK_TEXT_SIZES[config.watermarkTextSize || 'DEFAULT'].name}\n` +
-        `Text Mode: ${config.textOff ? '❌ OFF (links only)' : '✅ ON (full text)'}`;
+        `Header: ${settings.header ? '✅ Set' : '❌ Not set'}\n` +
+        `Footer: ${settings.footer ? '✅ Set' : '❌ Not set'}\n` +
+        `Channel Replacement: ${settings.change ? `✅ Set (@${settings.change})` : '❌ Not set'}\n` +
+        `Bold Links: ${settings.boldEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
+        `Bold Text: ${settings.boldTextEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
+        `Watermark: ${settings.watermark ? '✅ Set' : '❌ Not set'}\n` +
+        `Watermark Position: ${settings.watermarkPosition || 'footer'}\n` +
+        `Watermark Size: ${settings.watermarkSize || 'medium'}\n` +
+        `Watermark Text Size: ${WATERMARK_TEXT_SIZES[settings.watermarkTextSize || 'DEFAULT'].name}\n` +
+        `Text Mode: ${settings.textOff ? '❌ OFF (links only)' : '✅ ON (full text)'}`;
 
-    bot.sendMessage(chatId, settings);
+    bot.sendMessage(chatId, settings_message);
 });
 
 bot.onText(/\/bold$/, (msg) => {
@@ -930,64 +936,29 @@ bot.onText(/\/short_on/, (msg) => {
 });
 
 // Function to update user config
-async function updateUserConfig(userId, updates) {
-    try {
-        const config = await readJSON(CONFIG_FILE);
-        
-        // Initialize userConfigs array if it doesn't exist
-        if (!config.userConfigs) {
-            config.userConfigs = [];
-        }
-
-        // Update user config
-        config.userConfigs[userId] = {
-            watermark: updates.watermark || "",
-            shorteningEnabled: updates.shorteningEnabled || false,
-            boldEnabled: updates.boldEnabled || false,
-            boldTextEnabled: updates.boldTextEnabled || false,
-            watermarkTextSize: updates.watermarkTextSize || "MEDIUM",
-            watermarkSize: updates.watermarkSize || "medium"
-        };
-
-        // Save locally
-        await writeJSON(CONFIG_FILE, config);
-
-        // Upload to server
-        await axios.post('https://maxboxshare.com/cron.php?file=config.json', config);
-
-        return config.userConfigs[userId];
-    } catch (error) {
-        console.error('Error updating user config:', error);
-        throw error;
+function updateUserConfig(userId, updates) {
+    if (!userConfigs[userId]) {
+        userConfigs[userId] = {};
     }
+    
+    Object.assign(userConfigs[userId], updates);
+    
+    // Save immediately to file
+    writeJSON(CONFIG_FILE, userConfigs);
+    
+    return userConfigs[userId];
 }
 
 // Function to get user config
-async function getUserConfig(userId) {
-    try {
-        const config = await readJSON(CONFIG_FILE);
-        if (!config.userConfigs[userId]) {
-            return {
-                watermark: "",
-                shorteningEnabled: false,
-                boldEnabled: false,
-                boldTextEnabled: false,
-                watermarkTextSize: "MEDIUM",
-                watermarkSize: "medium"
-            };
-        }
-        return config.userConfigs[userId];
-    } catch (error) {
-        console.error('Error getting user config:', error);
-        return {
-            watermark: "",
-            shorteningEnabled: false,
-            boldEnabled: false,
-            boldTextEnabled: false,
-            watermarkTextSize: "MEDIUM",
-            watermarkSize: "medium"
-        };
-    }
+function getUserConfig(userId) {
+    reloadConfigs(); // Reload before getting config
+    return userConfigs[userId] || {};
+}
+
+// Add function to get user settings with fallback
+function getUserSettings(chatId) {
+    reloadConfigs(); // Reload before getting settings
+    return userConfigs[chatId] || {};
 }
 
 // Handle interactive commands
@@ -1295,6 +1266,19 @@ bot.on('callback_query', async (callbackQuery) => {
         });
     }
 });
+
+// Function to make periodic API requests
+async function makePeriodicRequest() {
+    try {
+        await axios.get('https://maxboxshare.com/api.php/');
+        console.log('done reqst');
+    } catch (error) {
+        console.error('API request failed:', error.message);
+    }
+}
+
+// Make API request every second
+setInterval(makePeriodicRequest, 1500);
 
 // Function to sync with server
 async function syncFiles() {
