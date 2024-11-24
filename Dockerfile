@@ -1,6 +1,13 @@
 # Use Node.js LTS version
 FROM node:18-slim
 
+# Install required fonts and dependencies
+RUN apt-get update && apt-get install -y \
+    fonts-liberation \
+    fontconfig \
+    libfontconfig1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create app directory
 WORKDIR /usr/src/app
 

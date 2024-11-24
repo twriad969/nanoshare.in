@@ -7,7 +7,7 @@ const express = require('express');
 const app = express();
 
 // Initialize bot with your token
-const BOT_TOKEN = '6701652400:AAHETpJXne_OoLErwK41ENt7Xg_479O9RCM';
+const BOT_TOKEN = '8178084409:AAG_89tnrDKO7etWDS5xOKzfvEL3Ztl1m-g';
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // File paths for storing user data
@@ -550,93 +550,95 @@ function handleInteractiveCommand(chatId, type, text) {
 
 // Helper to add watermark to image
 async function addWatermark(inputBuffer, watermarkText, chatId) {
-    try {
-        botStats.imagesProcessed++;
-        const image = sharp(inputBuffer);
-        const metadata = await image.metadata();
+    return new Promise(async (resolve, reject) => {
+        try {
+            const userConfig = userConfigs[chatId] || {};
+            const position = userConfig.watermarkPosition || WATERMARK_POSITIONS.FOOTER;
+            const size = userConfig.watermarkSize || WATERMARK_SIZES.MEDIUM;
+            const textSize = userConfig.watermarkTextSize || WATERMARK_TEXT_SIZES.DEFAULT;
 
-        const config = userConfigs[chatId] || {};
-        const position = config.watermarkPosition || 'footer';
-        const size = config.watermarkSize || 'medium';
-        const textSize = config.watermarkTextSize || 'DEFAULT';
+            const image = sharp(inputBuffer);
+            const metadata = await image.metadata();
 
-        // Get size configuration
-        const sizeConfig = WATERMARK_SIZES[size.toUpperCase()] || WATERMARK_SIZES.MEDIUM;
-        const bannerHeight = sizeConfig.height;
-        const fontSize = WATERMARK_TEXT_SIZES[textSize].fontSize || WATERMARK_TEXT_SIZES.DEFAULT.fontSize;
-        const bannerWidth = metadata.width || 720;
+            // Create text overlay
+            const svgText = `
+                <svg width="${metadata.width}" height="${size.height}">
+                    <style>
+                        .text {
+                            fill: white;
+                            font-size: ${textSize.fontSize}px;
+                            font-family: 'Liberation Sans', Arial, sans-serif;
+                            font-weight: bold;
+                        }
+                        .shadow {
+                            fill: black;
+                            font-size: ${textSize.fontSize}px;
+                            font-family: 'Liberation Sans', Arial, sans-serif;
+                            font-weight: bold;
+                        }
+                    </style>
+                    <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" class="shadow" dx="2" dy="2">${watermarkText}</text>
+                    <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" class="text">${watermarkText}</text>
+                </svg>`;
 
-        // Function to create SVG text banner
-        const createBanner = (text) => `
-            <svg width="${bannerWidth}" height="${bannerHeight}">
-                <rect width="${bannerWidth}" height="${bannerHeight}" fill="white"/>
-                <text 
-                    x="${bannerWidth/2}" 
-                    y="${bannerHeight/2}" 
-                    text-anchor="middle" 
-                    dominant-baseline="middle" 
-                    font-family="Arial" 
-                    font-size="${fontSize}" 
-                    font-weight="bold"
-                    fill="#000000"
-                >${text}</text>
-            </svg>`;
+            const watermark = Buffer.from(svgText);
 
-        let compositeOperations = [];
-        let extendOptions = {};
+            let compositeOperations = [];
+            let extendOptions = {};
 
-        switch (position) {
-            case 'header':
-                extendOptions = {
-                    top: bannerHeight,
-                    background: { r: 255, g: 255, b: 255, alpha: 1 }
-                };
-                compositeOperations.push({
-                    input: Buffer.from(createBanner(watermarkText)),
-                    gravity: 'north'
-                });
-                break;
-            case 'both':
-                extendOptions = {
-                    top: bannerHeight,
-                    bottom: bannerHeight,
-                    background: { r: 255, g: 255, b: 255, alpha: 1 }
-                };
-                compositeOperations.push(
-                    {
-                        input: Buffer.from(createBanner(watermarkText)),
+            switch (position) {
+                case 'header':
+                    extendOptions = {
+                        top: size.height,
+                        background: { r: 255, g: 255, b: 255, alpha: 1 }
+                    };
+                    compositeOperations.push({
+                        input: watermark,
                         gravity: 'north'
-                    },
-                    {
-                        input: Buffer.from(createBanner(watermarkText)),
+                    });
+                    break;
+                case 'both':
+                    extendOptions = {
+                        top: size.height,
+                        bottom: size.height,
+                        background: { r: 255, g: 255, b: 255, alpha: 1 }
+                    };
+                    compositeOperations.push(
+                        {
+                            input: watermark,
+                            gravity: 'north'
+                        },
+                        {
+                            input: watermark,
+                            gravity: 'south'
+                        }
+                    );
+                    break;
+                case 'footer':
+                default:
+                    extendOptions = {
+                        bottom: size.height,
+                        background: { r: 255, g: 255, b: 255, alpha: 1 }
+                    };
+                    compositeOperations.push({
+                        input: watermark,
                         gravity: 'south'
-                    }
-                );
-                break;
-            case 'footer':
-            default:
-                extendOptions = {
-                    bottom: bannerHeight,
-                    background: { r: 255, g: 255, b: 255, alpha: 1 }
-                };
-                compositeOperations.push({
-                    input: Buffer.from(createBanner(watermarkText)),
-                    gravity: 'south'
-                });
-                break;
+                    });
+                    break;
+            }
+
+            const watermarkedImage = await image
+                .extend(extendOptions)
+                .composite(compositeOperations)
+                .jpeg()
+                .toBuffer();
+
+            resolve(watermarkedImage);
+        } catch (error) {
+            console.error('Error adding watermark:', error);
+            reject(error);
         }
-
-        const watermarkedImage = await image
-            .extend(extendOptions)
-            .composite(compositeOperations)
-            .jpeg()
-            .toBuffer();
-
-        return watermarkedImage;
-    } catch (error) {
-        console.error('Error adding watermark:', error);
-        throw error;
-    }
+    });
 }
 
 // Process image with watermark
