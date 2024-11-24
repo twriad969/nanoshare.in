@@ -1,24 +1,48 @@
-# Dependencies
+# Dependency directories
 node_modules/
-package-lock.json
 
 # Environment variables
 .env
+.env.test
 
-# Runtime data
-temp/
+# Config files with sensitive data
+/apis/config.json
+/apis/apis.json
+config.json
+apis.json
+
+# Logs
+logs
 *.log
 npm-debug.log*
 
-# Config files with sensitive data
-config.json
-apis.json
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+temp/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
 
 # IDE specific files
 .idea/
 .vscode/
-*.swp
-*.swo
 
 # OS generated files
 .DS_Store
