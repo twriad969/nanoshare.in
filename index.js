@@ -7,7 +7,7 @@ const express = require('express');
 const app = express();
 
 // Initialize bot with your token
-const BOT_TOKEN = '6701652400:AAHETpJXne_OoLErwK41ENt7Xg_479O9RCM';
+const BOT_TOKEN = '8178084409:AAG_89tnrDKO7etWDS5xOKzfvEL3Ztl1m-g';
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // File paths for storing user data
@@ -283,6 +283,16 @@ function reloadConfigs() {
 // Store states for interactive commands
 const state = {};
 
+// Command types
+const COMMAND_TYPES = {
+    API: 'api',
+    HEADER: 'header',
+    FOOTER: 'footer',
+    CHANGE: 'change',
+    WATERMARK: 'watermark',
+    REPLACE_LINK: 'replace_link'
+};
+
 // Helper to shorten links using the AdLinkFly API
 async function shortenLink(apiKey, url) {
     try {
@@ -321,21 +331,36 @@ async function convertMaxboxshareLink(url) {
 // Process URLs in text
 async function processUrls(text, apiKey, chatId) {
     if (!text) return text;
-    
-    const config = userConfigs[chatId] || {};
-    const shorteningEnabled = config.shorteningEnabled !== false; // Default to true if not set
-    
-    if (!shorteningEnabled) {
-        return text; // Return text as is if shortening is disabled
-    }
 
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    let matches = text.match(urlRegex);
-    
-    if (!matches) return text;
+    const config = getUserConfig(chatId);
+    const replacementLinks = config.replacementLinks || {};
 
+    // First handle any replacement links
     let processedText = text;
+    Object.entries(replacementLinks).forEach(([originalLink, replacement]) => {
+        const regex = new RegExp(escapeRegExp(originalLink), 'g');
+        processedText = processedText.replace(regex, replacement);
+    });
+
+    // Don't process URLs that are in the replacement values
+    const replacementValues = Object.values(replacementLinks);
+    
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    let matches = processedText.match(urlRegex);
+    
+    if (!matches) return processedText;
+
     for (const url of matches) {
+        // Skip shortening if the URL is a replacement value
+        if (replacementValues.includes(url)) {
+            continue;
+        }
+
+        // Skip shortening if shortening is disabled or the URL is in ignoreLinks
+        if (!config.shorteningEnabled || (config.ignoreLinks && config.ignoreLinks.includes(url))) {
+            continue;
+        }
+
         try {
             if (url.includes('maxboxshare.com')) {
                 const convertedUrl = await convertMaxboxshareLink(url);
@@ -351,7 +376,13 @@ async function processUrls(text, apiKey, chatId) {
             console.error('Error processing URL:', error);
         }
     }
+
     return processedText;
+}
+
+// Helper function to escape special characters in string for regex
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Process captions with Telegram formatting and shorten links
@@ -363,7 +394,7 @@ async function processCaption(apiKey, caption, header, footer, channelLink, bold
         // Extract and process URLs
         const urlRegex = /(https?:\/\/[^\s]+)/g;
         let processedText = preservedText;
-        const config = userConfigs[chatId] || {};
+        const config = getUserConfig(chatId);
 
         // Process URLs
         const urlMatches = [...preservedText.matchAll(urlRegex)];
@@ -742,6 +773,8 @@ bot.onText(/\/help/, (msg) => {
         '/watermark_size - Set watermark size (small/medium/large/big/extra large)\n' +
         '/watermark_text_size - Set watermark text size\n' +
         '/change - Set channel username/link\n' +
+        '/replace_link - Set text/link to be replaced with custom text\n' +
+        '/manage_replacements - View and remove text replacements\n' +
         '/bold - Toggle bold formatting for links\n' +
         '/bold_text - Toggle bold formatting for entire caption\n' +
         '/text_on - Show full caption text\n' +
@@ -757,10 +790,16 @@ bot.onText(/\/help/, (msg) => {
         'Other Commands:\n' +
         '/settings - View current settings\n' +
         '/export_settings - Export all settings\n\n' +
+        'Admin Commands:\n' +
+        '/stats - View bot statistics\n' +
+        '/resetstats - Reset bot statistics\n' +
+        '/broadcast - Send message to all users\n\n' +
         'Tips:\n' +
         '• Forward any message with links to shorten them\n' +
         '• Send images to add watermark\n' +
         '• MaxboxShare links are converted automatically\n' +
+        '• Use /replace_link to set custom text replacements\n' +
+        '• Use /manage_replacements to view/remove replacements\n' +
         '• Use /short_off to process messages without shortening links\n' +
         '• Use /short_on to enable link shortening again\n' +
         '• Use /watermark_position to customize watermark placement\n' +
@@ -773,58 +812,118 @@ bot.onText(/\/help/, (msg) => {
 
 // New commands for managing settings
 bot.onText(/\/remove_header/, (msg) => {
-    resetSetting(msg.chat.id, 'header');
+    const chatId = msg.chat.id;
+    const config = getUserConfig(chatId);
+    
+    if (config.header) {
+        delete config.header;
+        updateUserConfig(chatId, config);
+        bot.sendMessage(chatId, '✅ Header has been removed successfully!');
+    } else {
+        bot.sendMessage(chatId, '❌ No header is currently set.');
+    }
 });
 
 bot.onText(/\/remove_footer/, (msg) => {
-    resetSetting(msg.chat.id, 'footer');
+    const chatId = msg.chat.id;
+    const config = getUserConfig(chatId);
+    
+    if (config.footer) {
+        delete config.footer;
+        updateUserConfig(chatId, config);
+        bot.sendMessage(chatId, '✅ Footer has been removed successfully!');
+    } else {
+        bot.sendMessage(chatId, '❌ No footer is currently set.');
+    }
 });
 
 bot.onText(/\/remove_username/, (msg) => {
-    resetSetting(msg.chat.id, 'change');
+    const chatId = msg.chat.id;
+    const config = getUserConfig(chatId);
+    
+    if (config.change) {
+        delete config.change;
+        updateUserConfig(chatId, config);
+        bot.sendMessage(chatId, '✅ Channel username/link has been removed successfully!');
+    } else {
+        bot.sendMessage(chatId, '❌ No channel username/link is currently set.');
+    }
 });
 
 bot.onText(/\/remove_watermark/, (msg) => {
-    resetSetting(msg.chat.id, 'watermark');
+    const chatId = msg.chat.id;
+    const config = getUserConfig(chatId);
+    
+    if (config.watermark) {
+        delete config.watermark;
+        updateUserConfig(chatId, config);
+        bot.sendMessage(chatId, '✅ Watermark has been removed successfully!');
+    } else {
+        bot.sendMessage(chatId, '❌ No watermark is currently set.');
+    }
 });
 
 bot.onText(/\/reset_settings/, (msg) => {
     const chatId = msg.chat.id;
     state[chatId] = { type: 'reset_confirm' };
+    
+    const options = {
+        reply_markup: {
+            keyboard: [
+                ['Yes, Reset ALL Settings'],
+                ['No, Cancel Reset']
+            ],
+            resize_keyboard: true,
+            one_time_keyboard: true
+        }
+    };
+    
     bot.sendMessage(chatId, 
-        '⚠️ WARNING: This will reset ALL your settings!\n\n' +
-        'The following data will be deleted:\n' +
-        '- API Key\n' +
-        '- Header Text\n' +
-        '- Footer Text\n' +
-        '- Channel Username\n' +
-        '- Watermark\n' +
-        '- Bold Settings\n\n' +
-        'Type "yes" to confirm reset or anything else to cancel.'
+        '⚠️ *WARNING: This will reset ALL your settings!*\n\n' +
+        'This includes:\n' +
+        '• API Key\n' +
+        '• Header\n' +
+        '• Footer\n' +
+        '• Channel Username\n' +
+        '• Watermark\n' +
+        '• All Other Settings\n\n' +
+        'Are you sure you want to continue?',
+        { parse_mode: 'Markdown', ...options }
     );
 });
 
-bot.onText(/\/export_settings/, (msg) => {
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const config = userConfigs[chatId] || {};
-    const apiKey = apiKeys[chatId] || 'Not set';
-
-    const settingsExport = 
-        '🔧 Exported Settings:\n\n' +
-        `API Key: ${apiKey === 'Not set' ? '❌ Not set' : '✅ Set'}\n` +
-        `Header: ${config.header || '❌ Not set'}\n` +
-        `Footer: ${config.footer || '❌ Not set'}\n` +
-        `Channel Replacement: ${config.change ? `✅ Set (@${config.change})` : '❌ Not set'}\n` +
-        `Bold Links: ${config.boldEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `Bold Text: ${config.boldTextEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `Watermark: ${config.watermark ? '✅ Set' : '❌ Not set'}\n` +
-        `Watermark Position: ${config.watermarkPosition || 'footer'}\n` +
-        `Watermark Size: ${config.watermarkSize || 'medium'}\n` +
-        `Watermark Text Size: ${WATERMARK_TEXT_SIZES[config.watermarkTextSize || 'DEFAULT'].name}\n` +
-        `Text Mode: ${config.textOff ? '❌ OFF (links only)' : '✅ ON (full text)'}\n` +
-        '\n💡 Note: API key is masked for security.';
-
-    bot.sendMessage(chatId, settingsExport);
+    const text = msg.text;
+    
+    if (state[chatId]?.type === 'reset_confirm') {
+        if (text === 'Yes, Reset ALL Settings') {
+            // Reset all settings
+            delete userConfigs[chatId];
+            delete apiKeys[chatId];
+            writeJSON(CONFIG_FILE, userConfigs);
+            writeJSON(API_KEYS_FILE, apiKeys);
+            delete state[chatId];
+            
+            const options = {
+                reply_markup: {
+                    remove_keyboard: true
+                }
+            };
+            
+            bot.sendMessage(chatId, '✅ All your settings have been reset successfully!', options);
+        } else if (text === 'No, Cancel Reset') {
+            delete state[chatId];
+            
+            const options = {
+                reply_markup: {
+                    remove_keyboard: true
+                }
+            };
+            
+            bot.sendMessage(chatId, '❌ Reset process cancelled.', options);
+        }
+    }
 });
 
 bot.onText(/\/settings/, (msg) => {
@@ -981,8 +1080,64 @@ function getUserSettings(chatId) {
 // Handle text input for interactive commands
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const userState = state[chatId];
     const text = msg.text;
-    
+
+    if (!userState) return;
+
+    if (userState.type === COMMAND_TYPES.REPLACE_LINK) {
+        const config = getUserConfig(chatId);
+        
+        if (userState.step === 'original') {
+            userState.originalText = text;
+            userState.step = 'replacement';
+            
+            bot.sendMessage(chatId, 
+                '✏️ Now send the replacement text/link/channel that should replace ' +
+                `"${text}"\n\n` +
+                'This can be any text, URL, or channel username.'
+            );
+            
+        } else if (userState.step === 'replacement') {
+            const originalText = userState.originalText;
+            
+            // Initialize replacementLinks if it doesn't exist
+            if (!config.replacementLinks) {
+                config.replacementLinks = {};
+            }
+            
+            // Add the replacement
+            config.replacementLinks[originalText] = text;
+            
+            // Add original text to ignoreLinks to prevent shortening
+            if (!config.ignoreLinks) {
+                config.ignoreLinks = [];
+            }
+            if (!config.ignoreLinks.includes(originalText)) {
+                config.ignoreLinks.push(originalText);
+            }
+            
+            // Save the updated config
+            updateUserConfig(chatId, config);
+            
+            // Store values before clearing state
+            const savedOriginalText = originalText;
+            const savedReplacementText = text;
+            
+            // Clear the state
+            delete state[chatId];
+            
+            bot.sendMessage(chatId, 
+                '✅ *Link Replacement Added*\n\n' +
+                `Original: \`${savedOriginalText}\`\n` +
+                `Replacement: \`${savedReplacementText}\`\n\n` +
+                'This replacement will be applied to all your future posts.',
+                { parse_mode: 'Markdown' }
+            );
+        }
+        return;
+    }
+
     // Update statistics
     botStats.totalMessages++;
     botStats.activeUsers.add(chatId);
@@ -998,68 +1153,32 @@ bot.on('message', async (msg) => {
     }
 
     // Handle command responses
-    if (state[chatId]) {
-        if (state[chatId].type === 'api') {
-            if (/^[a-zA-Z0-9]+$/.test(text)) {
-                apiKeys[chatId] = text;
-                writeJSON(API_KEYS_FILE, apiKeys);
-                bot.sendMessage(chatId, '✅ Your API key has been saved successfully! 🚀');
-                delete state[chatId];
-            } else {
-                bot.sendMessage(chatId, '❌ Invalid API key format. Please try again.');
-            }
-        } else if (state[chatId].type === 'header' || state[chatId].type === 'footer' || state[chatId].type === 'change' || state[chatId].type === 'watermark') {
-            handleInteractiveCommand(chatId, state[chatId].type, text);
+    if (userState.type === 'api') {
+        if (/^[a-zA-Z0-9]+$/.test(text)) {
+            apiKeys[chatId] = text;
+            writeJSON(API_KEYS_FILE, apiKeys);
+            bot.sendMessage(chatId, '✅ Your API key has been saved successfully! 🚀');
             delete state[chatId];
+        } else {
+            bot.sendMessage(chatId, '❌ Invalid API key format. Please try again.');
         }
+    } else if (userState.type === 'header' || userState.type === 'footer' || userState.type === 'change' || userState.type === 'watermark') {
+        handleInteractiveCommand(chatId, userState.type, text);
+        delete state[chatId];
     }
+});
 
-    // Handle media messages with caption
-    if ((msg.photo || msg.video) && msg.caption) {
-        try {
-            const config = userConfigs[chatId] || {};
-            const apiKey = apiKeys[chatId];
-            const { header, footer, change, boldEnabled, boldTextEnabled, watermarkTextSize } = config;
-
-            // Process caption
-            const newCaption = await processCaption(apiKey, msg.caption, header, footer, change, boldEnabled, boldTextEnabled, chatId);
-
-            // Handle photo with watermark
-            if (msg.photo) {
-                try {
-                    // Get the highest resolution photo
-                    const photo = msg.photo[msg.photo.length - 1];
-
-                    // Download the photo
-                    const file = await bot.getFile(photo.file_id);
-                    const photoUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-                    const response = await axios.get(photoUrl, { responseType: 'arraybuffer' });
-                    const photoBuffer = Buffer.from(response.data);
-
-                    // Process the photo with watermark
-                    const processedBuffer = await processImage(photoBuffer, chatId);
-
-                    // Send the processed photo
-                    await bot.sendPhoto(chatId, processedBuffer, {
-                        caption: newCaption,
-                        parse_mode: 'HTML'
-                    });
-                } catch (error) {
-                    console.error('Error processing photo:', error);
-                    bot.sendMessage(chatId, '❌ Error processing the photo. Please try again.');
-                }
-            } else if (msg.video) {
-                // For videos, just resend with new caption
-                await bot.sendVideo(chatId, msg.video.file_id, {
-                    caption: newCaption,
-                    parse_mode: 'HTML'
-                });
-            }
-        } catch (err) {
-            console.error('Error:', err);
-            bot.sendMessage(chatId, `❌ Error: ${err.message}`);
-        }
-    }
+// Handle /replace_link command
+bot.onText(/\/replace_link/, (msg) => {
+    const chatId = msg.chat.id;
+    state[chatId] = { type: COMMAND_TYPES.REPLACE_LINK, step: 'original' };
+    
+    bot.sendMessage(chatId, 
+        '🔄 *Link Replacement Setup*\n\n' +
+        'Please send the link or text you want to replace.\n' +
+        'You can send any URL, text, or channel username.',
+        { parse_mode: 'Markdown' }
+    );
 });
 
 // Add watermark position command
@@ -1267,6 +1386,59 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 });
 
+// Handle media messages with caption
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+
+    // Handle media messages with caption
+    if ((msg.photo || msg.video) && msg.caption) {
+        try {
+            const config = userConfigs[chatId] || {};
+            const apiKey = apiKeys[chatId];
+            const { header, footer, change, boldEnabled, boldTextEnabled, watermarkTextSize } = config;
+
+            // Process caption
+            const newCaption = await processCaption(apiKey, msg.caption, header, footer, change, boldEnabled, boldTextEnabled, chatId);
+
+            // Handle photo with watermark
+            if (msg.photo) {
+                try {
+                    // Get the highest resolution photo
+                    const photo = msg.photo[msg.photo.length - 1];
+
+                    // Download the photo
+                    const file = await bot.getFile(photo.file_id);
+                    const photoUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+                    const response = await axios.get(photoUrl, { responseType: 'arraybuffer' });
+                    const photoBuffer = Buffer.from(response.data);
+
+                    // Process the photo with watermark
+                    const processedBuffer = await processImage(photoBuffer, chatId);
+
+                    // Send the processed photo
+                    await bot.sendPhoto(chatId, processedBuffer, {
+                        caption: newCaption,
+                        parse_mode: 'HTML'
+                    });
+                } catch (error) {
+                    console.error('Error processing photo:', error);
+                    bot.sendMessage(chatId, '❌ Error processing the photo. Please try again.');
+                }
+            } else if (msg.video) {
+                // For videos, just resend with new caption
+                await bot.sendVideo(chatId, msg.video.file_id, {
+                    caption: newCaption,
+                    parse_mode: 'HTML'
+                });
+            }
+        } catch (err) {
+            console.error('Error:', err);
+            bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+        }
+    }
+});
+
 // Function to make periodic API requests
 async function makePeriodicRequest() {
     try {
@@ -1339,4 +1511,149 @@ app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
     console.log(`Access APIs at http://localhost:${PORT}/apis.json`);
     console.log(`Access Config at http://localhost:${PORT}/config.json`);
+});
+
+bot.onText(/\/manage_replacements/, (msg) => {
+    const chatId = msg.chat.id;
+    const config = getUserConfig(chatId);
+    const replacementLinks = config.replacementLinks || {};
+
+    if (Object.keys(replacementLinks).length === 0) {
+        bot.sendMessage(chatId, '❌ You have no text replacements set.\n\nUse /replace_link to add new replacements.');
+        return;
+    }
+
+    const buttons = Object.entries(replacementLinks).map(([original, replacement]) => {
+        return [{
+            text: `❌ "${original}" → "${replacement}"`,
+            callback_data: `remove_replacement:${original}`
+        }];
+    });
+
+    const options = {
+        reply_markup: {
+            inline_keyboard: [
+                ...buttons,
+                [{
+                    text: '🗑️ Remove All Replacements',
+                    callback_data: 'remove_all_replacements'
+                }]
+            ]
+        },
+        parse_mode: 'HTML'
+    };
+
+    bot.sendMessage(
+        chatId,
+        '🔄 <b>Your Text Replacements</b>\n\n' +
+        'Click on a replacement to remove it:\n\n' +
+        Object.entries(replacementLinks)
+            .map(([original, replacement], index) => 
+                `${index + 1}. "${original}" → "${replacement}"`)
+            .join('\n'),
+        options
+    );
+});
+
+bot.on('callback_query', async (query) => {
+    const data = query.data;
+    const chatId = query.message.chat.id;
+    const messageId = query.message.message_id;
+
+    if (data.startsWith('remove_replacement:')) {
+        const original = data.replace('remove_replacement:', '');
+        const config = getUserConfig(chatId);
+        
+        if (config.replacementLinks && config.replacementLinks[original]) {
+            // Remove from replacementLinks
+            delete config.replacementLinks[original];
+            
+            // Remove from ignoreLinks if it exists
+            if (config.ignoreLinks) {
+                config.ignoreLinks = config.ignoreLinks.filter(link => link !== original);
+            }
+            
+            // Save the updated config
+            updateUserConfig(chatId, config);
+
+            // Update the message with remaining replacements
+            const remainingReplacements = config.replacementLinks || {};
+            
+            if (Object.keys(remainingReplacements).length === 0) {
+                await bot.editMessageText(
+                    '❌ No text replacements remaining.\n\nUse /replace_link to add new replacements.',
+                    {
+                        chat_id: chatId,
+                        message_id: messageId
+                    }
+                );
+            } else {
+                const newButtons = Object.entries(remainingReplacements).map(([orig, repl]) => {
+                    return [{
+                        text: `❌ "${orig}" → "${repl}"`,
+                        callback_data: `remove_replacement:${orig}`
+                    }];
+                });
+
+                const options = {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    reply_markup: {
+                        inline_keyboard: [
+                            ...newButtons,
+                            [{
+                                text: '🗑️ Remove All Replacements',
+                                callback_data: 'remove_all_replacements'
+                            }]
+                        ]
+                    },
+                    parse_mode: 'HTML'
+                };
+
+                await bot.editMessageText(
+                    '🔄 <b>Your Text Replacements</b>\n\n' +
+                    'Click on a replacement to remove it:\n\n' +
+                    Object.entries(remainingReplacements)
+                        .map(([orig, repl], index) => 
+                            `${index + 1}. "${orig}" → "${repl}"`)
+                        .join('\n'),
+                    options
+                );
+            }
+
+            await bot.answerCallbackQuery(query.id, {
+                text: '✅ Replacement removed successfully!'
+            });
+        }
+    } else if (data === 'remove_all_replacements') {
+        const config = getUserConfig(chatId);
+        
+        if (config.replacementLinks) {
+            // Get all original texts to remove from ignoreLinks
+            const originals = Object.keys(config.replacementLinks);
+            
+            // Remove all replacements
+            delete config.replacementLinks;
+            
+            // Remove all related ignoreLinks
+            if (config.ignoreLinks) {
+                config.ignoreLinks = config.ignoreLinks.filter(link => !originals.includes(link));
+            }
+            
+            // Save the updated config
+            updateUserConfig(chatId, config);
+
+            await bot.editMessageText(
+                '❌ All text replacements have been removed.\n\nUse /replace_link to add new replacements.',
+                {
+                    chat_id: chatId,
+                    message_id: messageId
+                }
+            );
+
+            await bot.answerCallbackQuery(query.id, {
+                text: '✅ All replacements removed successfully!'
+            });
+        }
+    }
 });
