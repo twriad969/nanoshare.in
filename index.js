@@ -296,7 +296,7 @@ const COMMAND_TYPES = {
 // Helper to shorten links using the AdLinkFly API
 async function shortenLink(apiKey, url) {
     try {
-        const response = await axios.get(`https://maxshare.ronok.workers.dev/?link=${url}&apikey=${encodeURIComponent(apiKey)}`);
+        const response = await axios.get(`https://nanoshare.ronok.workers.dev/?link=${url}&apikey=${encodeURIComponent(apiKey)}`);
         if (response.data.url) {
             botStats.linksProcessed++;
             return response.data.url;
